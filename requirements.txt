@@ -1,0 +1,26 @@
+# wipo - 金融舆情论坛沙盘
+# Python >= 3.10
+
+mesa>=3.0
+numpy>=1.24
+networkx>=3.0
+
+# PDF 解析
+pdfplumber>=0.10
+
+# LangChain 生态
+langchain>=0.3
+langchain-openai>=0.2
+langchain-community>=0.3
+langchain-text-splitters>=0.3
+faiss-cpu>=1.7.4
+
+# 数据结构
+pydantic>=2.0
+
+# 环境变量
+python-dotenv>=1.0
+
+# API（预留）
+fastapi>=0.110
+uvicorn>=0.29
