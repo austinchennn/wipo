@@ -8,7 +8,7 @@
 快速使用：
     from src.extractors import extract_all_from_pdf, make_mock_extraction
 
-    # 真实 PDF（需要 OPENAI_API_KEY）
+    # 真实 PDF（需要 GOOGLE_API_KEY）
     result = extract_all_from_pdf("prospectus.pdf")
 
     # 本地测试（无需 PDF 和 API Key）

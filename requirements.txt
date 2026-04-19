@@ -10,13 +10,19 @@ pdfplumber>=0.10
 
 # LangChain 生态
 langchain>=0.3
-langchain-openai>=0.2
+langchain-google-genai>=2.0
 langchain-community>=0.3
 langchain-text-splitters>=0.3
 faiss-cpu>=1.7.4
 
 # 数据结构
 pydantic>=2.0
+sortedcontainers>=2.4
+
+# API 服务
+fastapi>=0.115
+uvicorn[standard]>=0.32
+websockets>=14.0
 
 # 环境变量
 python-dotenv>=1.0

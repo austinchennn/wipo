@@ -16,14 +16,11 @@ from __future__ import annotations
 
 from typing import List, Literal, Optional
 
-from langchain_core.documents import Document
 from pydantic import BaseModel, Field
 
 from .base_extractor import (
     FINANCIAL_KEYWORDS,
-    chunks_to_context,
-    filter_chunks_by_keywords,
-    get_llm,
+    LLMExtractor,
 )
 
 
@@ -144,54 +141,14 @@ _USER_PROMPT = """\
 #  Extractor 类
 # ─────────────────────────────────────────────────────────────────
 
-class FinancialExtractor:
-    """从招股书 PDF chunks 中提取财务数据。
+class FinancialExtractor(LLMExtractor["FinancialSummary"]):
+    """从招股书 PDF chunks 中提取财务数据。"""
 
-    用法：
-        extractor = FinancialExtractor()
-        summary, financial_chunks = extractor.extract(all_chunks)
-
-        # 机构 Agent 使用
-        inst_text = summary.institution_version
-
-        # 散户 Agent 使用
-        retail_text = summary.retail_version
-
-        # 普通人：整个财务模块不可见（由 access_control 强制执行）
-    """
-
-    def __init__(self, model: str = "gpt-4o-mini"):
-        llm = get_llm(model=model)
-        self._structured_llm = llm.with_structured_output(FinancialSummary)
-
-    def extract(
-        self,
-        all_chunks: List[Document],
-        min_keyword_hits: int = 1,
-    ) -> tuple[FinancialSummary, List[Document]]:
-        """
-        从全量 PDF chunks 中定位财务相关段落，调用 LLM 结构化提取。
-
-        返回:
-            summary          — FinancialSummary（机构版 + 散户版）
-            financial_chunks — 财务相关 Document 列表（供 RAG KB 索引）
-        """
-        financial_chunks = filter_chunks_by_keywords(
-            all_chunks, FINANCIAL_KEYWORDS, min_hits=min_keyword_hits
-        )
-
-        context = chunks_to_context(financial_chunks, max_chars=12_000)
-
-        messages = [
-            ("system", _SYSTEM_PROMPT),
-            ("human", _USER_PROMPT.format(context=context)),
-        ]
-        summary: FinancialSummary = self._structured_llm.invoke(messages)
-
-        for doc in financial_chunks:
-            doc.metadata["topic"] = "financial"
-
-        return summary, financial_chunks
+    KEYWORDS = FINANCIAL_KEYWORDS
+    SYSTEM_PROMPT = _SYSTEM_PROMPT
+    USER_PROMPT = _USER_PROMPT
+    TOPIC = "financial"
+    SUMMARY_CLASS = FinancialSummary
 
     @staticmethod
     def get_content_for_agent(
@@ -207,5 +164,4 @@ class FinancialExtractor:
             return summary.institution_version
         if agent_type == "RetailTraderAgent":
             return summary.retail_version
-        # NormalAgent 及其他
         return "[此信息对你不可见]"

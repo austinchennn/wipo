@@ -20,17 +20,22 @@ pipeline — 三个 Extractor 的编排器。
 
 from __future__ import annotations
 
+import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from langchain_core.documents import Document
 
+from ..config import CHUNK_OVERLAP, CHUNK_SIZE
 from .base_extractor import load_pdf_chunks
 from .financial_extractor import FinancialExtractor, FinancialSummary
 from .product_extractor import ProductExtractor, ProductSummary
 from .risk_extractor import RiskExtractor, RiskSummary
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -103,16 +108,16 @@ class ExtractionResult:
 
 def extract_all_from_pdf(
     pdf_path: str | Path,
-    model: str = "gpt-4o-mini",
-    chunk_size: int = 1500,
-    chunk_overlap: int = 200,
+    model: str = "gemini-2.5-flash",
+    chunk_size: int = CHUNK_SIZE,
+    chunk_overlap: int = CHUNK_OVERLAP,
     verbose: bool = True,
 ) -> ExtractionResult:
     """从 PDF 招股书中一次性提取三类信息。
 
     参数：
         pdf_path     — 用户上传的 PDF 路径
-        model        — OpenAI 模型名（gpt-4o-mini / gpt-4o）
+        model        — Gemini 模型名（gemini-2.5-flash）
         chunk_size   — 分块大小（字符数）
         chunk_overlap — 分块重叠（字符数）
         verbose      — 是否打印进度
@@ -129,44 +134,40 @@ def extract_all_from_pdf(
     except ImportError:
         pass
 
-    _log = print if verbose else lambda *a, **k: None
+    _level = logging.INFO if verbose else logging.DEBUG
+    _log = lambda msg: logger.log(_level, msg)
 
-    _log(f"\n{'─' * 55}")
-    _log(f"  招股书解析启动: {pdf_path.name}")
+    _log(f"{'─' * 55}")
+    _log(f"招股书解析启动: {pdf_path.name}")
     _log(f"{'─' * 55}")
 
     # Step 1: PDF → chunks
-    _log("  [1/4] PDF 分块...")
+    _log("[1/2] PDF 分块...")
     all_chunks = load_pdf_chunks(
         pdf_path, chunk_size=chunk_size, chunk_overlap=chunk_overlap
     )
-    _log(f"        共 {len(all_chunks)} 个 chunk（{chunk_size}字/块）")
+    _log(f"      共 {len(all_chunks)} 个 chunk（{chunk_size}字/块）")
 
-    # Step 2: 产品与业务提取
-    _log("  [2/4] 提取产品与业务信息 (ProductExtractor)...")
-    product_extractor = ProductExtractor(model=model)
-    product_summary, product_chunks = product_extractor.extract(all_chunks)
-    _log(f"        命中 {len(product_chunks)} 个产品相关 chunk")
-
-    # Step 3: 财务数据提取
-    _log("  [3/4] 提取财务数据 (FinancialExtractor)...")
+    # Step 2: 并行提取三类信息（节省约 2/3 时间）
+    _log("[2/2] 并行提取产品 / 财务 / 风险信息...")
+    product_extractor   = ProductExtractor(model=model)
     financial_extractor = FinancialExtractor(model=model)
-    financial_summary, financial_chunks = financial_extractor.extract(all_chunks)
-    _log(f"        命中 {len(financial_chunks)} 个财务相关 chunk")
+    risk_extractor      = RiskExtractor(model=model)
 
-    # Step 4: 风险与政策提取
-    _log("  [4/4] 提取风险与政策信息 (RiskExtractor)...")
-    risk_extractor = RiskExtractor(model=model)
-    risk_summary, risk_chunks = risk_extractor.extract(all_chunks)
-    _log(f"        命中 {len(risk_chunks)} 个风险相关 chunk")
-    _log(
-        f"        综合风险评分: {risk_summary.overall_risk_score:.2f} | "
-        f"政策关联度: {risk_summary.policy_correlation_score:.2f}"
-    )
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_product   = pool.submit(product_extractor.extract,   all_chunks)
+        f_financial = pool.submit(financial_extractor.extract, all_chunks)
+        f_risk      = pool.submit(risk_extractor.extract,      all_chunks)
+        product_summary,   product_chunks   = f_product.result()
+        financial_summary, financial_chunks = f_financial.result()
+        risk_summary,      risk_chunks      = f_risk.result()
 
-    _log(f"{'─' * 55}")
-    _log("  解析完成 ✓")
-    _log(f"{'─' * 55}\n")
+    _log(f"      产品 {len(product_chunks)} chunks | "
+         f"财务 {len(financial_chunks)} chunks | "
+         f"风险 {len(risk_chunks)} chunks")
+    _log(f"      综合风险评分: {risk_summary.overall_risk_score:.2f} | "
+         f"政策关联度: {risk_summary.policy_correlation_score:.2f}")
+    _log("解析完成 ✓")
 
     return ExtractionResult(
         product_summary=product_summary,

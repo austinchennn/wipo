@@ -147,34 +147,25 @@ Phase 结束后，`passive_inference.py` 根据以下规则推算 Passive Agent 
 
 ### 5.1 股价/市场模拟
 
-**状态：未决定**
-
-- 前端已有完整 K 线 + 订单簿 mockData
-- 后端目前没有任何市场撮合代码
-- 待确认：
-  - 这个版本要实现股价逻辑吗？
-  - 情绪 → 股价的映射公式（简单线性 or 复杂市场微观结构）？
-  - 机构 Agent 的"交易"权重是否高于散户？
+**状态：已完成** → 见 [03_market_exchange.md](03_market_exchange.md)
 
 ### 5.2 数据持久化
 
-**状态：未决定**
+**状态：已完成** → 见 [04_data_persistence.md](04_data_persistence.md)
 
-- 目前所有 posts/comments 在内存中，模拟结束后丢失
-- 待确认：
-  - 要写文件（JSON）或数据库（SQLite）吗？
-  - 有没有"回放"需求（按时间轴重播评论）？
+- SQLite WAL 模式，模拟结束后一次性写入
+- 每条评论带 `created_at` 时间戳，支持按时间顺序回放
+- 回放为模拟结束后离线查询，过程中不写磁盘
 
 ### 5.3 前端 ↔ 后端连接
 
-**状态：未开始**
+**状态：已完成** → 见 [05_frontend_backend.md](05_frontend_backend.md)
 
-- API 是空的 FastAPI stub
-- 前端是 Vite 默认模板，mockData.js 已有完整数据结构
-- 待确认：
-  - mockData 的数据格式是否最终确定？
-  - 优先实现哪个接口：`POST /simulate` 还是 WebSocket 评论流？
-  - 连接方案：WebSocket 实时推送 or 前端轮询？
+- FastAPI + WebSocket 实时推送架构
+- REST API：模拟启动、状态查询、历史回放、K线/持仓/情绪数据
+- WebSocket `/ws/feed`：模拟过程中实时推送所有事件（评论/情绪/K线/系统状态）
+- React 前端通过 `useSimulation` hook 管理 WebSocket 生命周期
+- Vite dev proxy 转发 `/api` 和 `/ws` 到后端
 
 ---
 

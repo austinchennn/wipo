@@ -4,20 +4,23 @@ base_extractor — PDF 加载、分块、LLM 工厂。
 所有 Extractor 的公共基础设施：
   - load_pdf_chunks()       : pdfplumber 读取 PDF → Document 列表
   - filter_chunks_by_keywords(): 关键词过滤定位目标章节
-  - get_llm()               : 构建 ChatOpenAI 实例
+  - get_llm()               : 构建 ChatGoogleGenerativeAI 实例
   - chunks_to_context()     : 拼合文本供 LLM 消费
 """
 
 from __future__ import annotations
 
 import os
+from copy import copy
 from pathlib import Path
-from typing import List
+from typing import Generic, List, Tuple, TypeVar
 
 import pdfplumber
 from langchain_core.documents import Document
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from ..config import CHUNK_OVERLAP, CHUNK_SIZE, EXTRACTOR_LLM_TEMPERATURE, MAX_CONTEXT_CHARS
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -62,8 +65,8 @@ RISK_KEYWORDS = [
 
 def load_pdf_chunks(
     pdf_path: str | Path,
-    chunk_size: int = 1500,
-    chunk_overlap: int = 200,
+    chunk_size: int = CHUNK_SIZE,
+    chunk_overlap: int = CHUNK_OVERLAP,
 ) -> List[Document]:
     """用 pdfplumber 读取 PDF，RecursiveCharacterTextSplitter 分块。
 
@@ -116,16 +119,16 @@ def filter_chunks_by_keywords(
 # ─────────────────────────────────────────────────────────────────
 
 def get_llm(
-    model: str = "gpt-4o-mini",
-    temperature: float = 0.0,
-) -> ChatOpenAI:
-    """构建 ChatOpenAI 实例（从环境变量读取 OPENAI_API_KEY）。"""
-    api_key = os.environ.get("OPENAI_API_KEY")
+    model: str = "gemini-2.5-flash",
+    temperature: float = EXTRACTOR_LLM_TEMPERATURE,
+) -> ChatGoogleGenerativeAI:
+    """构建 ChatGoogleGenerativeAI 实例（从环境变量读取 GOOGLE_API_KEY）。"""
+    api_key = os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         raise EnvironmentError(
-            "缺少 OPENAI_API_KEY，请在 .env 或 Shell 中配置。"
+            "缺少 GOOGLE_API_KEY，请在 .env 或 Shell 中配置。"
         )
-    return ChatOpenAI(model=model, temperature=temperature, api_key=api_key)
+    return ChatGoogleGenerativeAI(model=model, temperature=temperature, google_api_key=api_key)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -134,7 +137,7 @@ def get_llm(
 
 def chunks_to_context(
     chunks: List[Document],
-    max_chars: int = 12_000,
+    max_chars: int = MAX_CONTEXT_CHARS,
 ) -> str:
     """将多个 chunk 拼成一段文本，超出 max_chars 时截断。"""
     parts: List[str] = []
@@ -150,3 +153,60 @@ def chunks_to_context(
         parts.append(segment)
         total += len(segment)
     return "".join(parts)
+
+
+# ─────────────────────────────────────────────────────────────────
+#  通用 LLM Extractor 基类
+# ─────────────────────────────────────────────────────────────────
+
+T = TypeVar("T")
+
+
+class LLMExtractor(Generic[T]):
+    """三个 Extractor 的通用基类，消除重复的 __init__ 和 extract 逻辑。
+
+    子类只需定义以下类变量：
+        KEYWORDS      — 关键词过滤列表
+        SYSTEM_PROMPT — 系统提示词
+        USER_PROMPT   — 用户提示词模板（含 {context} 占位符）
+        TOPIC         — 话题标签（写入 Document.metadata["topic"]）
+        SUMMARY_CLASS — Pydantic 输出 Schema 类
+    """
+
+    KEYWORDS: List[str] = []
+    SYSTEM_PROMPT: str = ""
+    USER_PROMPT: str = ""
+    TOPIC: str = ""
+    SUMMARY_CLASS: type = None  # type: ignore[assignment]
+
+    def __init__(self, model: str = "gemini-2.5-flash") -> None:
+        llm = get_llm(model=model)
+        self._structured_llm = llm.with_structured_output(self.SUMMARY_CLASS)
+
+    def extract(
+        self,
+        all_chunks: List[Document],
+        min_keyword_hits: int = 1,
+    ) -> Tuple[T, List[Document]]:
+        """关键词过滤 → 上下文拼合 → LLM 结构化提取 → 打 topic 标签。
+
+        返回带有 topic 元数据标签的新 Document 列表（不修改 all_chunks 原始对象）。
+        """
+        filtered = filter_chunks_by_keywords(
+            all_chunks, self.KEYWORDS, min_hits=min_keyword_hits
+        )
+        context = chunks_to_context(filtered, max_chars=12_000)
+        messages = [
+            ("system", self.SYSTEM_PROMPT),
+            ("human", self.USER_PROMPT.format(context=context)),
+        ]
+        summary: T = self._structured_llm.invoke(messages)
+
+        # 拷贝 Document 再打标签，避免并行提取时修改共享对象
+        tagged: List[Document] = []
+        for doc in filtered:
+            new_doc = copy(doc)
+            new_doc.metadata = {**doc.metadata, "topic": self.TOPIC}
+            tagged.append(new_doc)
+
+        return summary, tagged

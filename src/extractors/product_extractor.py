@@ -16,14 +16,11 @@ from __future__ import annotations
 
 from typing import List
 
-from langchain_core.documents import Document
 from pydantic import BaseModel, Field
 
 from .base_extractor import (
     PRODUCT_KEYWORDS,
-    chunks_to_context,
-    filter_chunks_by_keywords,
-    get_llm,
+    LLMExtractor,
 )
 
 
@@ -118,56 +115,14 @@ Level B 中的掩码请使用 ████ 符号。
 #  Extractor 类
 # ─────────────────────────────────────────────────────────────────
 
-class ProductExtractor:
-    """从招股书 PDF chunks 中提取产品与业务信息。
+class ProductExtractor(LLMExtractor["ProductSummary"]):
+    """从招股书 PDF chunks 中提取产品与业务信息。"""
 
-    用法：
-        extractor = ProductExtractor()
-        summary, product_chunks = extractor.extract(all_chunks)
-
-        # 主持人用 Level A 发帖
-        post_text = summary.level_a
-
-        # 构建 RAG 知识库
-        # product_chunks → ProductKnowledgeBase
-    """
-
-    def __init__(self, model: str = "gpt-4o-mini"):
-        llm = get_llm(model=model)
-        self._structured_llm = llm.with_structured_output(ProductSummary)
-
-    def extract(
-        self,
-        all_chunks: List[Document],
-        min_keyword_hits: int = 1,
-    ) -> tuple[ProductSummary, List[Document]]:
-        """
-        从全量 PDF chunks 中定位产品相关段落，调用 LLM 结构化提取。
-
-        返回:
-            summary       — ProductSummary（三层级文本 + 结构化字段）
-            product_chunks — 产品相关 Document 列表（供 RAG KB 索引）
-        """
-        # Step 1: 关键词过滤，定位产品相关章节
-        product_chunks = filter_chunks_by_keywords(
-            all_chunks, PRODUCT_KEYWORDS, min_hits=min_keyword_hits
-        )
-
-        # Step 2: 拼合上下文（12k chars 上限，避免 token 爆炸）
-        context = chunks_to_context(product_chunks, max_chars=12_000)
-
-        # Step 3: LLM 结构化提取
-        messages = [
-            ("system", _SYSTEM_PROMPT),
-            ("human", _USER_PROMPT.format(context=context)),
-        ]
-        summary: ProductSummary = self._structured_llm.invoke(messages)
-
-        # Step 4: 标记 topic 元数据（供 RAG 过滤）
-        for doc in product_chunks:
-            doc.metadata["topic"] = "product"
-
-        return summary, product_chunks
+    KEYWORDS = PRODUCT_KEYWORDS
+    SYSTEM_PROMPT = _SYSTEM_PROMPT
+    USER_PROMPT = _USER_PROMPT
+    TOPIC = "product"
+    SUMMARY_CLASS = ProductSummary
 
     @staticmethod
     def get_content_for_agent(summary: ProductSummary, agent_type: str) -> str:
@@ -178,9 +133,9 @@ class ProductExtractor:
         RetailTraderAgent          → Level B
         """
         mapping = {
-            "HostAgent":        summary.level_a,
-            "InstTraderAgent":  summary.level_a,
-            "NormalAgent":      summary.level_c,
+            "HostAgent":         summary.level_a,
+            "InstTraderAgent":   summary.level_a,
+            "NormalAgent":       summary.level_c,
             "RetailTraderAgent": summary.level_b,
         }
         return mapping.get(agent_type, summary.level_c)

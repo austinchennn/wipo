@@ -16,14 +16,11 @@ from __future__ import annotations
 
 from typing import List, Literal
 
-from langchain_core.documents import Document
 from pydantic import BaseModel, Field
 
 from .base_extractor import (
     RISK_KEYWORDS,
-    chunks_to_context,
-    filter_chunks_by_keywords,
-    get_llm,
+    LLMExtractor,
 )
 
 
@@ -151,54 +148,14 @@ _USER_PROMPT = """\
 #  Extractor 类
 # ─────────────────────────────────────────────────────────────────
 
-class RiskExtractor:
-    """从招股书 PDF chunks 中提取风险与政策关联信息。
+class RiskExtractor(LLMExtractor["RiskSummary"]):
+    """从招股书 PDF chunks 中提取风险与政策关联信息。"""
 
-    用法：
-        extractor = RiskExtractor()
-        summary, risk_chunks = extractor.extract(all_chunks)
-
-        # 机构/主持人使用
-        full_risk = summary.high_sensitivity_version
-
-        # 散户使用
-        masked_risk = summary.normal_version
-
-        # 普通人：整个风险模块不可见（由 access_control 强制执行）
-    """
-
-    def __init__(self, model: str = "gpt-4o-mini"):
-        llm = get_llm(model=model)
-        self._structured_llm = llm.with_structured_output(RiskSummary)
-
-    def extract(
-        self,
-        all_chunks: List[Document],
-        min_keyword_hits: int = 1,
-    ) -> tuple[RiskSummary, List[Document]]:
-        """
-        从全量 PDF chunks 中定位风险相关段落，调用 LLM 结构化提取。
-
-        返回:
-            summary     — RiskSummary（高敏感版 + 普通版）
-            risk_chunks — 风险相关 Document 列表（供 RAG KB 索引）
-        """
-        risk_chunks = filter_chunks_by_keywords(
-            all_chunks, RISK_KEYWORDS, min_hits=min_keyword_hits
-        )
-
-        context = chunks_to_context(risk_chunks, max_chars=12_000)
-
-        messages = [
-            ("system", _SYSTEM_PROMPT),
-            ("human", _USER_PROMPT.format(context=context)),
-        ]
-        summary: RiskSummary = self._structured_llm.invoke(messages)
-
-        for doc in risk_chunks:
-            doc.metadata["topic"] = "policy"
-
-        return summary, risk_chunks
+    KEYWORDS = RISK_KEYWORDS
+    SYSTEM_PROMPT = _SYSTEM_PROMPT
+    USER_PROMPT = _USER_PROMPT
+    TOPIC = "policy"
+    SUMMARY_CLASS = RiskSummary
 
     @staticmethod
     def get_content_for_agent(summary: RiskSummary, agent_type: str) -> str:

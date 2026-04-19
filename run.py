@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 
 from src.environment.forum import ForumModel
 
@@ -58,6 +59,12 @@ def main():
                         help="随机种子（默认 42）")
 
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
     try:
         from dotenv import load_dotenv

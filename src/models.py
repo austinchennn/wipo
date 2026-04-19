@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
 
@@ -30,7 +31,9 @@ class Comment:
     content: str
     temp: float               # 发言温度 / 热情值
     phase: int                # 所属阶段 1 / 2 / 3
+    sentiment: Optional[str] = None     # "bull" | "bear" | "neutral"
     parent_id: Optional[str] = None
+    created_at: Optional[datetime] = None  # 评论生成时刻（用于回放排序）
     children: List[Comment] = field(default_factory=list)
 
     @staticmethod
@@ -51,6 +54,7 @@ class Post:
     round_num: int
     topic: str                # "product" | "financial" | "policy"
     content: str
+    created_at: Optional[datetime] = None  # 帖子创建时刻
     comments: Dict[int, List[Comment]] = field(
         default_factory=lambda: {1: [], 2: [], 3: []}
     )

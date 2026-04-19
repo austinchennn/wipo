@@ -15,18 +15,26 @@ RAGSystem：
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
+from ..config import (
+    DEFAULT_EMBEDDING_MODEL,
+    RAG_QUERY_K,
+    RAG_RETRIEVE_K,
+)
 from .access_control import (
     AccessLevel,
     apply_access_control,
     get_access_level,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..extractors.pipeline import ExtractionResult
@@ -51,7 +59,7 @@ class KnowledgeBase:
         cls,
         topic: str,
         chunks: List[Document],
-        embeddings: OpenAIEmbeddings,
+        embeddings: GoogleGenerativeAIEmbeddings,
     ) -> "KnowledgeBase":
         """从 Document 列表构建 FAISS 索引。"""
         kb = cls(topic=topic)
@@ -67,13 +75,13 @@ class KnowledgeBase:
 
     # ── 检索 ──
 
-    def query(self, question: str, k: int = 4) -> List[Document]:
+    def query(self, question: str, k: int = RAG_QUERY_K) -> List[Document]:
         """语义检索，返回最相关的 k 个 Document。"""
         if self._vectorstore is None:
             return []
         return self._vectorstore.similarity_search(question, k=k)
 
-    def query_text(self, question: str, k: int = 4) -> str:
+    def query_text(self, question: str, k: int = RAG_QUERY_K) -> str:
         """检索后拼合为纯文本字符串。"""
         docs = self.query(question, k=k)
         if not docs:
@@ -127,11 +135,11 @@ class RAGSystem:
     def build_from_extraction(
         cls,
         result: "ExtractionResult",
-        model: str = "text-embedding-3-small",
+        model: str = DEFAULT_EMBEDDING_MODEL,
     ) -> "RAGSystem":
         """从 ExtractionResult 一键构建三个 KB。
 
-        需要 OPENAI_API_KEY 环境变量。
+        需要 GOOGLE_API_KEY 环境变量。
         若 chunks 为空（如 make_mock_extraction），返回空 KB（静态模式仍可用）。
         """
         try:
@@ -140,19 +148,19 @@ class RAGSystem:
         except ImportError:
             pass
 
-        api_key = os.environ.get("OPENAI_API_KEY")
+        api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
             raise EnvironmentError(
-                "RAGSystem 需要 OPENAI_API_KEY 以构建向量索引。"
+                "RAGSystem 需要 GOOGLE_API_KEY 以构建向量索引。"
             )
 
-        embeddings = OpenAIEmbeddings(model=model, api_key=api_key)
+        embeddings = GoogleGenerativeAIEmbeddings(model=model, google_api_key=api_key)
 
         def _build(topic: str, chunks: List[Document]) -> KnowledgeBase:
             if chunks:
-                print(f"  [RAG] 构建 {topic} KB ({len(chunks)} chunks)...")
+                logger.info("[RAG] 构建 %s KB (%d chunks)...", topic, len(chunks))
                 return KnowledgeBase.build(topic, chunks, embeddings)
-            print(f"  [RAG] {topic} KB 无 chunks，使用空索引（静态模式）")
+            logger.info("[RAG] %s KB 无 chunks，使用空索引（静态模式）", topic)
             return KnowledgeBase.build_empty(topic)
 
         return cls(
@@ -200,7 +208,7 @@ class RAGSystem:
         agent: "BaseUserAgent",
         topic: str,
         query: str,
-        k: int = 3,
+        k: int = RAG_RETRIEVE_K,
     ) -> str:
         """
         根据 agent 类型和话题执行 FAISS 检索，并强制应用访问控制。
@@ -240,9 +248,9 @@ class RAGSystem:
         }
 
     def status(self) -> str:
-        """打印三个 KB 的就绪状态。"""
+        """返回三个 KB 的就绪状态字符串。"""
         lines = ["RAGSystem 状态:"]
         for topic, kb in self._kbs.items():
-            status = "就绪 ✓" if kb.is_ready else "空索引（静态模式）"
-            lines.append(f"  {topic:12s} → {status}")
+            state = "就绪 ✓" if kb.is_ready else "空索引（静态模式）"
+            lines.append(f"  {topic:12s} → {state}")
         return "\n".join(lines)

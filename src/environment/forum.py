@@ -16,9 +16,11 @@ Agent 分层：
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from mesa import Model
 
@@ -31,10 +33,12 @@ from ..agents.base_agent import (
     RetailTraderAgent,
 )
 from ..agents.passive_inference import infer_passive_sentiment
+from ..config import MAX_CONCURRENT_LLM_CALLS
+from ..market.exchange import Exchange
+from ..market.trading_agent import TradingSession
 from ..models import Comment, Post, Sentiment, SentimentGrid, ThreadSnapshot
 
-# 并发 LLM 调用时的最大同时请求数（避免触发 API rate limit）
-_MAX_CONCURRENT = 50
+logger = logging.getLogger(__name__)
 
 
 class ForumModel(Model):
@@ -56,9 +60,9 @@ class ForumModel(Model):
         n_active: Optional[int] = None,
         raw_sections: Optional[Dict[str, str]] = None,
         pdf_path: Optional[str] = None,
-        llm_model: str = "gpt-4o-mini",
+        llm_model: str = "gemini-2.5-flash",
         use_rag: bool = True,
-        max_concurrent: int = _MAX_CONCURRENT,
+        max_concurrent: int = MAX_CONCURRENT_LLM_CALLS,
         seed: Optional[int] = None,
     ):
         """
@@ -83,6 +87,10 @@ class ForumModel(Model):
         self.n_retail = n_retail
         self.max_concurrent = max_concurrent
         self.rag_system = None
+
+        # ── 事件回调（WebSocket 实时推送用）──
+        # 签名: async def on_event(event: Dict[str, Any]) -> None
+        self.on_event: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
 
         # ── 信息来源 ──
         if pdf_path is not None:
@@ -125,12 +133,25 @@ class ForumModel(Model):
         # ── 全 Agent ID 列表（情绪矩阵排序用）──
         self.all_agent_ids: List[int] = [a.unique_id for a in all_agents]
 
+        # ── 交易所 ──
+        self.exchange = Exchange()
+        for a in all_agents:
+            self.exchange.init_portfolio(a.unique_id, a.__class__.__name__)
+
         # ── 存档 ──
         self.posts: List[Post] = []
         self.sentiment_history: List[SentimentGrid] = []
         self.round_num: int = 0
 
     # ─────────────────── 工具：按比例抽样 ───────────────────
+
+    async def _emit(self, event: Dict[str, Any]) -> None:
+        """触发事件回调（如果已设置）。"""
+        if self.on_event is not None:
+            try:
+                await self.on_event(event)
+            except Exception as e:
+                logger.debug("事件推送失败: %s", e)
 
     @staticmethod
     def _sample(
@@ -159,9 +180,9 @@ class ForumModel(Model):
         if use_rag:
             try:
                 self.rag_system = RAGSystem.build_from_extraction(result)
-                print(self.rag_system.status())
+                logger.info(self.rag_system.status())
             except EnvironmentError as e:
-                print(f"  [警告] RAG 构建失败（{e}），降级为静态模式")
+                logger.warning("RAG 构建失败（%s），降级为静态模式", e)
                 self.rag_system = RAGSystem.build_static_only(result)
         else:
             self.rag_system = RAGSystem.build_static_only(result)
@@ -230,17 +251,6 @@ class ForumModel(Model):
                 results.append(res)
         return results
 
-    def _run_phase(
-        self,
-        agents: List[BaseUserAgent],
-        context_fn,
-        candidates: Optional[List[Comment]] = None,
-    ) -> List[Tuple[BaseUserAgent, CommentResult]]:
-        """同步包装：在 Mesa 同步上下文中执行异步并发调用。"""
-        return asyncio.run(
-            self._run_agents_async(agents, context_fn, candidates)
-        )
-
     # ═══════════════════════════════════════════════════
     #  SentimentGrid 构建
     # ═══════════════════════════════════════════════════
@@ -286,43 +296,89 @@ class ForumModel(Model):
     # ═══════════════════════════════════════════════════
 
     def run(self):
+        """同步入口：整个模拟在一个 asyncio event loop 中完成（仅调用一次）。"""
+        asyncio.run(self.arun())
+
+    async def arun(self):
+        """异步主循环 —— 消除了每个 Phase 独立创建 event loop 的开销。"""
+        self._started_at = datetime.now().isoformat()
+
         n_active  = len(self.active_participants)
         n_passive = len(self.passive_participants)
         n_total   = n_active + n_passive + 1  # +1 for host
 
-        print(
-            f"\n{'#' * 60}\n"
-            f"  金融舆情论坛沙盘启动\n"
-            f"  总 Agent: {n_total}  "
-            f"(Active={n_active}  Passive={n_passive}  Host=1)\n"
-            f"  Active 构成: "
-            f"普通={sum(1 for a in self.active_participants if isinstance(a, NormalAgent))}  "
-            f"机构={sum(1 for a in self.active_participants if isinstance(a, InstTraderAgent))}  "
-            f"散户={sum(1 for a in self.active_participants if isinstance(a, RetailTraderAgent))}\n"
-            f"{'#' * 60}"
+        logger.info(
+            "金融舆情论坛沙盘启动 | 总Agent=%d (Active=%d Passive=%d Host=1) "
+            "普通=%d 机构=%d 散户=%d",
+            n_total, n_active, n_passive,
+            sum(1 for a in self.active_participants if isinstance(a, NormalAgent)),
+            sum(1 for a in self.active_participants if isinstance(a, InstTraderAgent)),
+            sum(1 for a in self.active_participants if isinstance(a, RetailTraderAgent)),
         )
+
+        await self._emit({
+            "type": "system",
+            "event": "sim_start",
+            "n_total": n_total,
+            "n_active": n_active,
+            "n_passive": n_passive,
+            "rounds": self.MACRO_ROUNDS,
+        })
 
         for r in range(self.MACRO_ROUNDS):
             self.round_num = r + 1
-            print(f"\n{'=' * 55}")
-            print(f"  宏观轮次 {self.round_num} / {self.MACRO_ROUNDS}")
-            print(f"{'=' * 55}")
-            self.step()
+            logger.info("═══ 宏观轮次 %d / %d ═══", self.round_num, self.MACRO_ROUNDS)
+            await self._emit({
+                "type": "system",
+                "event": "round_start",
+                "round": self.round_num,
+                "total_rounds": self.MACRO_ROUNDS,
+            })
+            await self.astep()
 
         total_comments = sum(
             len(p.comments[ph]) for p in self.posts for ph in (1, 2, 3)
         )
-        print(
-            f"\n{'#' * 60}\n"
-            f"  模拟结束 | 帖子={len(self.posts)}  评论={total_comments}\n"
-            f"  SentimentGrid 快照数: {len(self.sentiment_history)}\n"
-            f"{'#' * 60}"
+        logger.info(
+            "模拟结束 | 帖子=%d 评论=%d SentimentGrid快照=%d",
+            len(self.posts), total_comments, len(self.sentiment_history),
         )
 
+        # 交易所汇总
+        ms = self.exchange.market_summary()
+        logger.info(
+            "市场汇总 | 最新价=%.2f IPO价=%.2f 涨跌=%.2f%% "
+            "总成交=%d股 成交笔数=%d K线=%d根",
+            ms["last_price"], ms["ipo_price"], ms["change_pct"],
+            ms["total_volume"], ms["total_trades"], ms["ticks"],
+        )
+
+        # ── 持久化：模拟结束后一次性写入 SQLite ──
+        try:
+            from ..persistence.database import SimulationDB
+            db = SimulationDB()
+            sim_id = db.save(self)
+            db.close()
+            logger.info("模拟数据已持久化 | simulation_id=%d", sim_id)
+        except Exception as e:
+            logger.warning("持久化失败（不影响模拟结果）: %s", e)
+
+        await self._emit({
+            "type": "system",
+            "event": "sim_end",
+            "total_posts": len(self.posts),
+            "total_comments": total_comments,
+            "market": ms,
+        })
+
     def step(self):
+        """Mesa API 兼容接口（单轮同步执行）。完整模拟请使用 run()。"""
+        asyncio.run(self.astep())
+
+    async def astep(self):
         for topic in self.TOPICS:
             post = self._host_publish(topic)
-            self._run_thread(post)
+            await self._run_thread(post)
 
     # ═══════════════════════════════════════════════════
     #  发帖
@@ -335,29 +391,67 @@ class ForumModel(Model):
             round_num=self.round_num,
             topic=topic,
             content=content,
+            created_at=datetime.now(),
         )
         self.posts.append(post)
-        print(f"\n  📌 [发帖] {post.id}  主题: {self.TOPIC_CN[topic]}")
+        logger.info("[发帖] %s  主题: %s", post.id, self.TOPIC_CN[topic])
         return post
 
     # ═══════════════════════════════════════════════════
     #  帖子生命周期: 3 Phase
     # ═══════════════════════════════════════════════════
 
-    def _run_thread(self, post: Post):
-        snap1 = self._phase_1(post)
-        snap2 = self._phase_2(post, snap1)
-        self._phase_3(post, snap2)
+    async def _run_thread(self, post: Post):
+        await self._emit({
+            "type": "post",
+            "post_id": post.id,
+            "round": post.round_num,
+            "topic": post.topic,
+            "topic_cn": self.TOPIC_CN[post.topic],
+            "content": post.content[:500],
+            "created_at": post.created_at.isoformat() if post.created_at else None,
+        })
+
+        snap1 = await self._phase_1(post)
+        snap2 = await self._phase_2(post, snap1)
+        await self._phase_3(post, snap2)
 
         p1, p2, p3 = (len(post.comments[i]) for i in (1, 2, 3))
-        print(f"  🔒 [结束] {post.id}  P1={p1}  P2={p2}  P3={p3}")
+        logger.info("[结束] %s  P1=%d P2=%d P3=%d", post.id, p1, p2, p3)
+
+        # ── 帖子讨论结束 → 触发交易撮合 ──
+        latest_sg = self.sentiment_history[-1] if self.sentiment_history else None
+        if latest_sg is not None:
+            all_agents = self.active_participants + self.passive_participants
+            event = f"{self.TOPIC_CN[post.topic]}讨论结束"
+            session = TradingSession(self.exchange, latest_sg.grid)
+            bar = session.run(all_agents, event=event)
+            await self._emit({
+                "type": "trade",
+                "post_id": post.id,
+                "event": event,
+                "last_price": self.exchange.last_price,
+                "bar": {
+                    "tick": bar.tick,
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.volume,
+                    "trade_count": bar.trade_count,
+                } if bar else None,
+            })
 
     # ─────────────────────────────────────────────
     #  Phase 1 — 直面楼主
     # ─────────────────────────────────────────────
 
-    def _phase_1(self, post: Post) -> ThreadSnapshot:
-        print(f"    ── Phase 1: 直面楼主 ──")
+    async def _phase_1(self, post: Post) -> ThreadSnapshot:
+        logger.info("── Phase 1: 直面楼主 ──")
+        await self._emit({
+            "type": "phase", "event": "phase_start",
+            "post_id": post.id, "phase": 1, "label": "直面楼主",
+        })
 
         agents = list(self.active_participants)
         random.shuffle(agents)
@@ -371,12 +465,12 @@ class ForumModel(Model):
                 f"【你可见的相关信息】\n{visible}"
             )
 
-        active_results = self._run_phase(agents, ctx, candidates=None)
+        active_results = await self._run_agents_async(agents, ctx, candidates=None)
 
         for agent, result in active_results:
             if not agent.should_comment(result.temp):
                 continue
-            post.comments[1].append(Comment(
+            comment = Comment(
                 id=Comment.make_id(),
                 author_id=agent.unique_id,
                 author_type=agent.__class__.__name__,
@@ -384,38 +478,70 @@ class ForumModel(Model):
                 content=result.comment,
                 temp=result.temp,
                 phase=1,
-            ))
+                sentiment=result.sentiment,
+                created_at=datetime.now(),
+            )
+            post.comments[1].append(comment)
+            await self._emit({
+                "type": "comment",
+                "post_id": post.id,
+                "comment": {
+                    "id": comment.id,
+                    "agentId": comment.author_id,
+                    "agentType": comment.author_type,
+                    "content": comment.content,
+                    "temp": comment.temp,
+                    "sentiment": comment.sentiment,
+                    "phase": 1,
+                    "parentId": None,
+                    "timestamp": comment.created_at.isoformat() if comment.created_at else None,
+                },
+            })
 
-        # SentimentGrid（Active + Passive 推算）
         sg = self._build_sentiment_grid(
             self.round_num, post.topic, 1, active_results
         )
         self.sentiment_history.append(sg)
         s = sg.summary()
-        print(
-            f"      → 评论: {len(post.comments[1])} 条 | "
-            f"情绪: bull={s['bull']} bear={s['bear']} neutral={s['neutral']}"
+        logger.info(
+            "  → 评论: %d 条 | 情绪: bull=%d bear=%d neutral=%d",
+            len(post.comments[1]), s["bull"], s["bear"], s["neutral"],
         )
+        await self._emit({
+            "type": "sentiment",
+            "post_id": post.id, "phase": 1,
+            "summary": s,
+            "total_comments": len(post.comments[1]),
+        })
 
         return self._build_snapshot(post, phase=1)
 
     # ─────────────────────────────────────────────
-    #  Phase 2 — 互攻 / 抱团
+    #  Phase 2 / 3 — 共用回复逻辑
     # ─────────────────────────────────────────────
 
-    def _phase_2(
-        self, post: Post, prev_snapshot: ThreadSnapshot
+    async def _reply_phase(
+        self,
+        post: Post,
+        phase: int,
+        prev_snapshot: ThreadSnapshot,
+        prev_comments: List[Comment],
     ) -> ThreadSnapshot:
-        print(f"    ── Phase 2: 互攻 / 抱团 ──")
+        """Phase 2（互攻/抱团）和 Phase 3（余波）的公共实现。"""
+        label = "互攻 / 抱团" if phase == 2 else "余波"
+        logger.info("── Phase %d: %s ──", phase, label)
+        await self._emit({
+            "type": "phase", "event": "phase_start",
+            "post_id": post.id, "phase": phase, "label": label,
+        })
 
-        if not post.comments[1]:
-            print("      → 跳过（Phase 1 无评论）")
-            return self._build_snapshot(post, phase=2)
+        if not prev_comments:
+            logger.info("  → 跳过（Phase %d 无评论）", phase - 1)
+            return self._build_snapshot(post, phase=phase)
 
         agents = list(self.active_participants)
         random.shuffle(agents)
         ctx_prefix = prev_snapshot.to_text()
-        candidates = post.comments[1]
 
         def ctx(agent: BaseUserAgent) -> str:
             rag = self.get_agent_context(
@@ -423,74 +549,15 @@ class ForumModel(Model):
             )
             return f"{ctx_prefix}\n\n【你可见的相关知识库信息】\n{rag}"
 
-        active_results = self._run_phase(agents, ctx, candidates=candidates)
+        active_results = await self._run_agents_async(
+            agents, ctx, candidates=prev_comments
+        )
 
         for agent, result in active_results:
             if not agent.should_comment(result.temp):
                 continue
             target = next(
-                (c for c in candidates
-                 if c.id == result.reply_to_id and c.author_id != agent.unique_id),
-                None,
-            )
-            if target is None:
-                continue
-            sub = Comment(
-                id=Comment.make_id(),
-                author_id=agent.unique_id,
-                author_type=agent.__class__.__name__,
-                author_name=f"{agent.__class__.__name__}#{agent.unique_id}",
-                content=result.comment,
-                temp=result.temp,
-                phase=2,
-                parent_id=target.id,
-            )
-            target.children.append(sub)
-            post.comments[2].append(sub)
-
-        sg = self._build_sentiment_grid(
-            self.round_num, post.topic, 2, active_results
-        )
-        self.sentiment_history.append(sg)
-        s = sg.summary()
-        print(
-            f"      → 评论: {len(post.comments[2])} 条 | "
-            f"情绪: bull={s['bull']} bear={s['bear']} neutral={s['neutral']}"
-        )
-
-        return self._build_snapshot(post, phase=2)
-
-    # ─────────────────────────────────────────────
-    #  Phase 3 — 余波
-    # ─────────────────────────────────────────────
-
-    def _phase_3(
-        self, post: Post, prev_snapshot: ThreadSnapshot
-    ) -> ThreadSnapshot:
-        print(f"    ── Phase 3: 余波 ──")
-
-        if not post.comments[2]:
-            print("      → 跳过（Phase 2 无评论）")
-            return self._build_snapshot(post, phase=3)
-
-        agents = list(self.active_participants)
-        random.shuffle(agents)
-        ctx_prefix = prev_snapshot.to_text()
-        candidates = post.comments[2]
-
-        def ctx(agent: BaseUserAgent) -> str:
-            rag = self.get_agent_context(
-                agent, post.topic, query=ctx_prefix[:300]
-            )
-            return f"{ctx_prefix}\n\n【你可见的相关知识库信息】\n{rag}"
-
-        active_results = self._run_phase(agents, ctx, candidates=candidates)
-
-        for agent, result in active_results:
-            if not agent.should_comment(result.temp):
-                continue
-            target = next(
-                (c for c in candidates
+                (c for c in prev_comments
                  if c.id == result.reply_to_id and c.author_id != agent.unique_id),
                 None,
             )
@@ -503,23 +570,56 @@ class ForumModel(Model):
                 author_name=f"{agent.__class__.__name__}#{agent.unique_id}",
                 content=result.comment,
                 temp=result.temp,
-                phase=3,
+                phase=phase,
+                sentiment=result.sentiment,
                 parent_id=target.id,
+                created_at=datetime.now(),
             )
             target.children.append(reply)
-            post.comments[3].append(reply)
+            post.comments[phase].append(reply)
+            await self._emit({
+                "type": "comment",
+                "post_id": post.id,
+                "comment": {
+                    "id": reply.id,
+                    "agentId": reply.author_id,
+                    "agentType": reply.author_type,
+                    "content": reply.content,
+                    "temp": reply.temp,
+                    "sentiment": reply.sentiment,
+                    "phase": phase,
+                    "parentId": reply.parent_id,
+                    "timestamp": reply.created_at.isoformat() if reply.created_at else None,
+                },
+            })
 
         sg = self._build_sentiment_grid(
-            self.round_num, post.topic, 3, active_results
+            self.round_num, post.topic, phase, active_results
         )
         self.sentiment_history.append(sg)
         s = sg.summary()
-        print(
-            f"      → 评论: {len(post.comments[3])} 条 | "
-            f"情绪: bull={s['bull']} bear={s['bear']} neutral={s['neutral']}"
+        logger.info(
+            "  → 评论: %d 条 | 情绪: bull=%d bear=%d neutral=%d",
+            len(post.comments[phase]), s["bull"], s["bear"], s["neutral"],
         )
+        await self._emit({
+            "type": "sentiment",
+            "post_id": post.id, "phase": phase,
+            "summary": s,
+            "total_comments": len(post.comments[phase]),
+        })
 
-        return self._build_snapshot(post, phase=3)
+        return self._build_snapshot(post, phase=phase)
+
+    async def _phase_2(
+        self, post: Post, prev_snapshot: ThreadSnapshot
+    ) -> ThreadSnapshot:
+        return await self._reply_phase(post, 2, prev_snapshot, post.comments[1])
+
+    async def _phase_3(
+        self, post: Post, prev_snapshot: ThreadSnapshot
+    ) -> ThreadSnapshot:
+        return await self._reply_phase(post, 3, prev_snapshot, post.comments[2])
 
     # ═══════════════════════════════════════════════════
     #  快照构建

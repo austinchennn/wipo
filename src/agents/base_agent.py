@@ -31,6 +31,7 @@ import numpy as np
 from mesa import Agent
 from pydantic import BaseModel, Field
 
+from ..config import AGENT_LLM_TEMPERATURE
 from ..models import Comment, Sentiment
 
 
@@ -143,14 +144,14 @@ def _get_structured_llm():
             load_dotenv()
         except ImportError:
             pass
-        from langchain_openai import ChatOpenAI
-        api_key = os.environ.get("OPENAI_API_KEY")
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
             return None  # 无 API Key → 退回 mock
-        llm = ChatOpenAI(
-            model=os.environ.get("AGENT_LLM_MODEL", "gpt-4o-mini"),
-            temperature=0.8,  # 评论需要多样性
-            api_key=api_key,
+        llm = ChatGoogleGenerativeAI(
+            model=os.environ.get("AGENT_LLM_MODEL", "gemini-2.5-flash"),
+            temperature=AGENT_LLM_TEMPERATURE,
+            google_api_key=api_key,
         )
         _llm_instance = llm.with_structured_output(CommentOutput)
     return _llm_instance
