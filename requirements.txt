@@ -10,6 +10,7 @@ pdfplumber>=0.10
 
 # LangChain 生态
 langchain>=0.3
+langgraph>=0.2
 langchain-google-genai>=2.0
 langchain-community>=0.3
 langchain-text-splitters>=0.3

@@ -11,6 +11,9 @@
     # 设置 Active Agent 数量（其余为 Passive，情绪统计推算）
     python run.py --normal 5000 --inst 500 --retail 4500 --active 1000
 
+    # 用 LangGraph 状态图编排帖子生命周期（发帖 → 3 Phase → 撮合）
+    python run.py --graph
+
     # 完整参数示例
     python run.py --pdf prospectus.pdf \\
                   --normal 700 --inst 100 --retail 200 \\
@@ -55,6 +58,10 @@ def main():
     parser.add_argument("--concurrent", type=int,  default=50,
                         help="并发 LLM 调用上限（默认 50，防 rate limit）")
 
+    # ── 调度引擎 ──
+    parser.add_argument("--graph",      action="store_true",
+                        help="用 LangGraph StateGraph 编排帖子生命周期")
+
     parser.add_argument("--seed",       type=int,  default=42,
                         help="随机种子（默认 42）")
 
@@ -81,6 +88,7 @@ def main():
         llm_model=args.model,
         use_rag=not args.no_rag,
         max_concurrent=args.concurrent,
+        use_graph=args.graph,
         seed=args.seed,
     )
     model.run()

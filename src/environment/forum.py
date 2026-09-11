@@ -63,6 +63,7 @@ class ForumModel(Model):
         llm_model: str = "gemini-2.5-flash",
         use_rag: bool = True,
         max_concurrent: int = MAX_CONCURRENT_LLM_CALLS,
+        use_graph: bool = False,
         seed: Optional[int] = None,
     ):
         """
@@ -78,6 +79,9 @@ class ForumModel(Model):
             llm_model     — Extractor 使用的 LLM 模型
             use_rag       — 是否构建 FAISS RAG 知识库
             max_concurrent — 并发 LLM 调用上限（防止 rate limit）
+            use_graph     — 用 LangGraph StateGraph 编排帖子生命周期
+                            False（默认）= 原有的串行调用链
+                            True  = Phase 跳过逻辑交给图的条件边
             seed          — 随机种子
         """
         super().__init__(seed=seed)
@@ -86,6 +90,8 @@ class ForumModel(Model):
         self.n_inst = n_inst
         self.n_retail = n_retail
         self.max_concurrent = max_concurrent
+        self.use_graph = use_graph
+        self._thread_graph = None          # 懒编译，见 thread_graph 属性
         self.rag_system = None
 
         # ── 事件回调（WebSocket 实时推送用）──
@@ -377,8 +383,11 @@ class ForumModel(Model):
 
     async def astep(self):
         for topic in self.TOPICS:
-            post = self._host_publish(topic)
-            await self._run_thread(post)
+            if self.use_graph:
+                await self._run_thread_via_graph(topic)
+            else:
+                post = self._host_publish(topic)
+                await self._run_thread(post)
 
     # ═══════════════════════════════════════════════════
     #  发帖
@@ -401,7 +410,8 @@ class ForumModel(Model):
     #  帖子生命周期: 3 Phase
     # ═══════════════════════════════════════════════════
 
-    async def _run_thread(self, post: Post):
+    async def _emit_post(self, post: Post) -> None:
+        """推送发帖事件（串行链路与 LangGraph 链路共用）。"""
         await self._emit({
             "type": "post",
             "post_id": post.id,
@@ -412,6 +422,24 @@ class ForumModel(Model):
             "created_at": post.created_at.isoformat() if post.created_at else None,
         })
 
+    @property
+    def thread_graph(self):
+        """懒编译并缓存帖子线程图（仅 use_graph=True 时用到）。"""
+        if self._thread_graph is None:
+            from ..graph import build_thread_graph
+            self._thread_graph = build_thread_graph(self)
+        return self._thread_graph
+
+    async def _run_thread_via_graph(self, topic: str):
+        """LangGraph 驱动的帖子生命周期：发帖 → 3 Phase → 撮合结算。"""
+        from ..graph import run_thread_graph
+        state = await run_thread_graph(self, topic)
+        logger.debug("[图执行路径] %s", " → ".join(state.get("trace", [])))
+        return state
+
+    async def _run_thread(self, post: Post):
+        await self._emit_post(post)
+
         snap1 = await self._phase_1(post)
         snap2 = await self._phase_2(post, snap1)
         await self._phase_3(post, snap2)
@@ -419,7 +447,10 @@ class ForumModel(Model):
         p1, p2, p3 = (len(post.comments[i]) for i in (1, 2, 3))
         logger.info("[结束] %s  P1=%d P2=%d P3=%d", post.id, p1, p2, p3)
 
-        # ── 帖子讨论结束 → 触发交易撮合 ──
+        await self._settle_trades(post)
+
+    async def _settle_trades(self, post: Post) -> None:
+        """帖子讨论结束 → 按最新情绪矩阵撮合一轮交易。"""
         latest_sg = self.sentiment_history[-1] if self.sentiment_history else None
         if latest_sg is not None:
             all_agents = self.active_participants + self.passive_participants
