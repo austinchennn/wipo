@@ -23,7 +23,7 @@ from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from ..llm import GeminiProvider
+from ..composition import RunOptions, build_simulation
 from ..settings import Settings
 from .broadcaster import broadcaster
 
@@ -123,20 +123,16 @@ async def start_simulation(req: SimulateRequest):
 
     async def run_sim():
         try:
-            from ..environment.forum import ForumModel
-
-            model = ForumModel(
-                llm=GeminiProvider(settings),
+            model = build_simulation(settings, RunOptions(
                 n_normal=req.n_normal,
                 n_inst=req.n_inst,
                 n_retail=req.n_retail,
                 n_active=req.n_active,
                 pdf_path=req.pdf_path,
                 use_rag=req.use_rag,
-                llm_model=req.llm_model,
                 max_concurrent=req.max_concurrent,
                 seed=req.seed,
-            )
+            ))
             model.on_event = broadcaster.broadcast
             sim_state.model = model
 

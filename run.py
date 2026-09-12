@@ -33,8 +33,7 @@ from __future__ import annotations
 import argparse
 import logging
 
-from src.environment.forum import ForumModel
-from src.llm import GeminiProvider
+from src.composition import RunOptions, build_simulation
 from src.settings import Settings
 
 
@@ -81,27 +80,20 @@ def main():
     )
 
     settings = Settings.from_env().with_model(args.model)
-    llm = GeminiProvider(settings)
-    if not llm.is_available:
-        logging.getLogger(__name__).warning(
-            "未检测到 GOOGLE_API_KEY，Agent 将全程使用 mock 评论"
-        )
-
-    model = ForumModel(
+    opts = RunOptions(
         n_normal=args.normal,
         n_inst=args.inst,
         n_retail=args.retail,
         n_active=args.active,
         pdf_path=args.pdf,
-        llm_model=args.model,
         use_rag=not args.no_rag,
-        max_concurrent=args.concurrent,
-        llm=llm,
         use_graph=args.graph,
         use_spider=args.spider,
+        max_concurrent=args.concurrent,
         seed=args.seed,
     )
-    model.run()
+
+    build_simulation(settings, opts).run()
 
 
 if __name__ == "__main__":
