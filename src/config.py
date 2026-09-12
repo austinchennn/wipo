@@ -24,6 +24,14 @@ MAX_CONTEXT_CHARS: int = 12_000        # chunks_to_context 拼合上限
 RAG_QUERY_K: int = 4     # KnowledgeBase.query / query_text 默认 top-k
 RAG_RETRIEVE_K: int = 3  # RAGSystem.retrieve_for_agent 默认 top-k
 
+# ── 外部政策接入（Spider）──
+POLICY_CACHE_TTL_DAYS: int = 7         # 缓存有效期，超期才重新爬取
+POLICY_MAX_ITEMS_PER_SOURCE: int = 20  # 每个源单次最多取几条
+POLICY_MIN_BODY_CHARS: int = 80        # 正文短于此长度视为噪音，丢弃
+POLICY_HTTP_TIMEOUT: float = 10.0      # 单次请求超时（秒）
+POLICY_CHUNK_SIZE: int = 800           # 政策文本切块（比招股书更碎）
+POLICY_CHUNK_OVERLAP: int = 100
+
 # ── 交易系统 ──
 IPO_PRICE: float = 130.0          # IPO 发行价（模拟起始价）
 TICK_SIZE: float = 0.01           # 最小价格变动单位（1 分）
