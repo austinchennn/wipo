@@ -2,8 +2,10 @@
 classifier —— 给清洗后的政策打多标签
 
 两条路径：
-  1. 有 GOOGLE_API_KEY → LLM 结构化输出（temperature=0，分类要确定性）
-  2. 无 Key / 调用失败 → 关键词规则兜底（中英双语词表）
+  1. 注入的 LLMProvider 可用 → 结构化输出（temperature=0，分类要确定性）
+  2. provider 为 None / 不可用 / 调用失败 → 关键词规则兜底（中英双语词表）
+
+LLM 由调用方注入，本模块不碰环境变量，也不持有任何全局状态。
 
 标签只用于让 Agent 在 RAG 检索时更容易命中相关政策，
 不参与任何数值计算——按设计，外部数据不修改 Agent 属性。
@@ -13,13 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, Field
 
 from ..config import EXTRACTOR_LLM_TEMPERATURE, MAX_CONCURRENT_LLM_CALLS
+from ..ports.llm import LLMProvider, StructuredModel
 from ..spiders.models import CleanedPolicy
 
 logger = logging.getLogger(__name__)
@@ -90,37 +92,14 @@ class PolicyLabels(BaseModel):
     )
 
 
-_llm_instance = None
-_llm_initialized = False
+def _structured(llm: Optional[LLMProvider]) -> Optional[StructuredModel]:
+    """从注入的 provider 取一个绑定 PolicyLabels 的模型。
 
-
-def _get_classifier_llm():
-    """懒加载分类 LLM；无 API Key 返回 None（调用方走规则兜底）。"""
-    global _llm_instance, _llm_initialized
-    if _llm_initialized:
-        return _llm_instance
-
-    _llm_initialized = True
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        pass
-
-    api_key = os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        logger.info("[分类] 无 GOOGLE_API_KEY，使用关键词规则兜底")
+    llm 为 None 或后端不可用 → 返回 None，调用方走关键词规则。
+    """
+    if llm is None:
         return None
-
-    from langchain_google_genai import ChatGoogleGenerativeAI
-
-    llm = ChatGoogleGenerativeAI(
-        model=os.environ.get("AGENT_LLM_MODEL", "gemini-2.5-flash"),
-        temperature=EXTRACTOR_LLM_TEMPERATURE,
-        google_api_key=api_key,
-    )
-    _llm_instance = llm.with_structured_output(PolicyLabels)
-    return _llm_instance
+    return llm.structured(PolicyLabels, temperature=EXTRACTOR_LLM_TEMPERATURE)
 
 
 def _prompt(policy: CleanedPolicy) -> str:
@@ -133,16 +112,18 @@ def _prompt(policy: CleanedPolicy) -> str:
     )
 
 
-async def aclassify(policy: CleanedPolicy) -> List[str]:
+async def aclassify(
+    policy: CleanedPolicy, llm: Optional[LLMProvider] = None
+) -> List[str]:
     """给单条政策打标签；LLM 不可用或失败时退回规则。"""
-    llm = _get_classifier_llm()
+    model = _structured(llm)
     fallback = classify_by_rules(f"{policy.title} {policy.text}")
 
-    if llm is None:
+    if model is None:
         return fallback
 
     try:
-        out: PolicyLabels = await llm.ainvoke(_prompt(policy))
+        out: PolicyLabels = await model.ainvoke(_prompt(policy))
     except Exception as e:
         logger.debug("[分类] LLM 调用失败，退回规则: %s", e)
         return fallback
@@ -154,17 +135,21 @@ async def aclassify(policy: CleanedPolicy) -> List[str]:
 
 async def aclassify_all(
     policies: Sequence[CleanedPolicy],
+    llm: Optional[LLMProvider] = None,
     max_concurrent: int = MAX_CONCURRENT_LLM_CALLS,
 ) -> List[CleanedPolicy]:
     """并发给一批政策打标签，就地写回 labels 字段并返回同一批对象。"""
     if not policies:
         return list(policies)
 
+    if _structured(llm) is None:
+        logger.info("[分类] LLM 不可用，使用关键词规则兜底")
+
     semaphore = asyncio.Semaphore(max_concurrent)
 
     async def one(p: CleanedPolicy) -> List[str]:
         async with semaphore:
-            return await aclassify(p)
+            return await aclassify(p, llm)
 
     results = await asyncio.gather(
         *(one(p) for p in policies), return_exceptions=True

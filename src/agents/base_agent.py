@@ -10,6 +10,10 @@
   InstTraderAgent    product=FULL     financial=FULL     policy=FULL
   RetailTraderAgent  product=MASKED   financial=MASKED   policy=MASKED
 
+LLM 来源：
+  Agent 不自己创建 LLM，而是通过所属 ForumModel 拿注入的 LLMProvider
+  （见 self.llm）。没有可用后端时 provider 返回 None，退回 _mock_comment。
+
 comment() 设计：
   - 15 维人格属性 → 自然语言 persona 描述（不传原始数值给 LLM）
   - LLM 返回 {"comment": str, "temp": float, "reply_to_id": str | null}
@@ -20,7 +24,6 @@ comment() 设计：
 from __future__ import annotations
 
 import asyncio
-import os
 import random
 import re
 from dataclasses import dataclass
@@ -33,6 +36,7 @@ from pydantic import BaseModel, Field
 
 from ..config import AGENT_LLM_TEMPERATURE
 from ..models import Comment, Sentiment
+from ..ports.llm import LLMProvider, StructuredModel
 
 
 # ═══════════════════════════════════════════════════════
@@ -129,32 +133,6 @@ class CommentResult:
     reply_to_id: Optional[str] = None
 
 
-# ═══════════════════════════════════════════════════════
-#  模块级 LLM 懒初始化（所有 Agent 共享同一个实例）
-# ═══════════════════════════════════════════════════════
-
-_llm_instance = None
-
-def _get_structured_llm():
-    """懒加载：首次调用时初始化 LLM，之后复用。"""
-    global _llm_instance
-    if _llm_instance is None:
-        try:
-            from dotenv import load_dotenv
-            load_dotenv()
-        except ImportError:
-            pass
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        api_key = os.environ.get("GOOGLE_API_KEY")
-        if not api_key:
-            return None  # 无 API Key → 退回 mock
-        llm = ChatGoogleGenerativeAI(
-            model=os.environ.get("AGENT_LLM_MODEL", "gemini-2.5-flash"),
-            temperature=AGENT_LLM_TEMPERATURE,
-            google_api_key=api_key,
-        )
-        _llm_instance = llm.with_structured_output(CommentOutput)
-    return _llm_instance
 
 
 # ═══════════════════════════════════════════════════════
@@ -322,6 +300,23 @@ class BaseUserAgent(Agent):
         """temp ≥ 阈值 → 开口发言；否则潜水"""
         return temp >= self.comment_threshold
 
+    # ─────────── LLM 来源（由 ForumModel 注入）───────────
+
+    @property
+    def llm(self) -> LLMProvider:
+        """所属 Model 注入的 LLMProvider。
+
+        Mesa 的 Agent 本来就持有 self.model，这里不额外加构造参数；
+        ForumModel 保证 .llm 一定存在（最差是 NullLLMProvider）。
+        """
+        return self.model.llm
+
+    def _structured_llm(self) -> Optional[StructuredModel]:
+        """拿绑定了 CommentOutput 的模型；不可用返回 None。"""
+        return self.llm.structured(
+            CommentOutput, temperature=AGENT_LLM_TEMPERATURE
+        )
+
     # ─────────── Persona 文本（懒缓存）───────────
 
     @property
@@ -347,7 +342,7 @@ class BaseUserAgent(Agent):
 
         返回：CommentResult（comment, temp, sentiment, reply_to_id）
         """
-        llm = _get_structured_llm()
+        llm = self._structured_llm()
         if llm is None:
             return self._mock_comment(candidates)
 
@@ -379,7 +374,7 @@ class BaseUserAgent(Agent):
         异步版评论生成（供大规模并发调用使用）。
         ForumModel._run_phase_async() 会用 asyncio.gather() 并发调用此方法。
         """
-        llm = _get_structured_llm()
+        llm = self._structured_llm()
         if llm is None:
             return self._mock_comment(candidates)
 

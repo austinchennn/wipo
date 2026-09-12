@@ -34,6 +34,8 @@ import argparse
 import logging
 
 from src.environment.forum import ForumModel
+from src.llm import GeminiProvider
+from src.settings import Settings
 
 
 def main():
@@ -78,11 +80,12 @@ def main():
         datefmt="%H:%M:%S",
     )
 
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        pass
+    settings = Settings.from_env().with_model(args.model)
+    llm = GeminiProvider(settings)
+    if not llm.is_available:
+        logging.getLogger(__name__).warning(
+            "未检测到 GOOGLE_API_KEY，Agent 将全程使用 mock 评论"
+        )
 
     model = ForumModel(
         n_normal=args.normal,
@@ -93,6 +96,7 @@ def main():
         llm_model=args.model,
         use_rag=not args.no_rag,
         max_concurrent=args.concurrent,
+        llm=llm,
         use_graph=args.graph,
         use_spider=args.spider,
         seed=args.seed,

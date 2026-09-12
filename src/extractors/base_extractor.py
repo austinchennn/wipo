@@ -4,23 +4,22 @@ base_extractor — PDF 加载、分块、LLM 工厂。
 所有 Extractor 的公共基础设施：
   - load_pdf_chunks()       : pdfplumber 读取 PDF → Document 列表
   - filter_chunks_by_keywords(): 关键词过滤定位目标章节
-  - get_llm()               : 构建 ChatGoogleGenerativeAI 实例
+  - require_structured()    : 从注入的 LLMProvider 取结构化模型
   - chunks_to_context()     : 拼合文本供 LLM 消费
 """
 
 from __future__ import annotations
 
-import os
 from copy import copy
 from pathlib import Path
 from typing import Generic, List, Tuple, TypeVar
 
 import pdfplumber
 from langchain_core.documents import Document
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from ..config import CHUNK_OVERLAP, CHUNK_SIZE, EXTRACTOR_LLM_TEMPERATURE, MAX_CONTEXT_CHARS
+from ..ports.llm import LLMProvider, StructuredModel
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -118,17 +117,19 @@ def filter_chunks_by_keywords(
 #  LLM 工厂
 # ─────────────────────────────────────────────────────────────────
 
-def get_llm(
-    model: str = "gemini-2.5-flash",
-    temperature: float = EXTRACTOR_LLM_TEMPERATURE,
-) -> ChatGoogleGenerativeAI:
-    """构建 ChatGoogleGenerativeAI 实例（从环境变量读取 GOOGLE_API_KEY）。"""
-    api_key = os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
+def require_structured(llm: LLMProvider, schema: type) -> StructuredModel:
+    """从注入的 provider 取结构化模型；不可用直接报错。
+
+    Extractor 和 Agent 不同：Agent 没有 LLM 可以退回 mock 评论，
+    但招股书解析没有 LLM 就没有任何意义，所以这里选择快速失败。
+    """
+    model = llm.structured(schema, temperature=EXTRACTOR_LLM_TEMPERATURE)
+    if model is None:
         raise EnvironmentError(
-            "缺少 GOOGLE_API_KEY，请在 .env 或 Shell 中配置。"
+            "招股书解析需要可用的 LLM。请配置 GOOGLE_API_KEY，"
+            "或改用 make_mock_extraction() 走离线路径。"
         )
-    return ChatGoogleGenerativeAI(model=model, temperature=temperature, google_api_key=api_key)
+    return model
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -179,9 +180,8 @@ class LLMExtractor(Generic[T]):
     TOPIC: str = ""
     SUMMARY_CLASS: type = None  # type: ignore[assignment]
 
-    def __init__(self, model: str = "gemini-2.5-flash") -> None:
-        llm = get_llm(model=model)
-        self._structured_llm = llm.with_structured_output(self.SUMMARY_CLASS)
+    def __init__(self, llm: LLMProvider) -> None:
+        self._structured_llm = require_structured(llm, self.SUMMARY_CLASS)
 
     def extract(
         self,

@@ -28,8 +28,10 @@ from ..config import (
     POLICY_CHUNK_OVERLAP,
     POLICY_CHUNK_SIZE,
 )
-from ..persistence.policy_store import PolicyStore
 from ..policy_engine.classifier import aclassify_all
+from ..ports.llm import LLMProvider
+from ..ports.persistence import PolicyCache
+from ..ports.spider import PolicyFeed
 from ..spiders.models import CleanedPolicy, RawPolicy
 from ..spiders.news_cleaner import clean_all
 from ..spiders.policy_spider import PolicySpider
@@ -121,11 +123,16 @@ def policies_to_documents(
 
 
 def build_ingest_graph(
-    store: PolicyStore,
-    spider: Optional[PolicySpider] = None,
+    store: PolicyCache,
+    spider: Optional[PolicyFeed] = None,
+    llm: Optional[LLMProvider] = None,
 ):
-    """为指定 PolicyStore / PolicySpider 编译一张政策接入图。"""
-    spider = spider or PolicySpider()
+    """编译一张政策接入图。
+
+    三个依赖都只按 Protocol 约束（PolicyCache / PolicyFeed / LLMProvider），
+    所以测试可以塞本地 fixture feed 和内存缓存，不碰网络也不碰 sqlite。
+    """
+    spider = spider if spider is not None else PolicySpider()
 
     async def check_cache(state: IngestState) -> Dict[str, Any]:
         ttl = state["ttl_days"]
@@ -152,7 +159,7 @@ def build_ingest_graph(
         return {"policies": clean_all(state["raws"]), "trace": [CLEAN]}
 
     async def classify(state: IngestState) -> Dict[str, Any]:
-        policies = await aclassify_all(state["policies"])
+        policies = await aclassify_all(state["policies"], llm=llm)
         return {"policies": policies, "trace": [CLASSIFY]}
 
     async def persist(state: IngestState) -> Dict[str, Any]:

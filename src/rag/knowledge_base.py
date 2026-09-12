@@ -9,25 +9,22 @@ KnowledgeBase：
 RAGSystem：
     - 持有 product_kb / financial_kb / risk_kb 三个 KB
     - retrieve_for_agent(agent, topic, query) — 按 AccessLevel 控制返回内容
-    - build_from_extraction(result) — 从 ExtractionResult 一键构建
+    - build_from_extraction(result, embeddings) — 从 ExtractionResult 构建
     - get_static_section(topic, agent_type) — 直接返回 Extractor 生成的静态文本
+
+实现 ports.KnowledgeProvider 契约，ForumModel 只依赖那个 Protocol。
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
-from ..config import (
-    DEFAULT_EMBEDDING_MODEL,
-    RAG_QUERY_K,
-    RAG_RETRIEVE_K,
-)
+from ..config import RAG_QUERY_K, RAG_RETRIEVE_K
+from ..ports.llm import EmbeddingModel
 from .access_control import (
     AccessLevel,
     apply_access_control,
@@ -59,7 +56,7 @@ class KnowledgeBase:
         cls,
         topic: str,
         chunks: List[Document],
-        embeddings: GoogleGenerativeAIEmbeddings,
+        embeddings: EmbeddingModel,
     ) -> "KnowledgeBase":
         """从 Document 列表构建 FAISS 索引。"""
         kb = cls(topic=topic)
@@ -147,27 +144,13 @@ class RAGSystem:
     def build_from_extraction(
         cls,
         result: "ExtractionResult",
-        model: str = DEFAULT_EMBEDDING_MODEL,
+        embeddings: EmbeddingModel,
     ) -> "RAGSystem":
-        """从 ExtractionResult 一键构建三个 KB。
+        """从 ExtractionResult 构建三个 KB。
 
-        需要 GOOGLE_API_KEY 环境变量。
+        embeddings 由调用方注入（composition root 决定是 Gemini 还是别的）。
         若 chunks 为空（如 make_mock_extraction），返回空 KB（静态模式仍可用）。
         """
-        try:
-            from dotenv import load_dotenv
-            load_dotenv()
-        except ImportError:
-            pass
-
-        api_key = os.environ.get("GOOGLE_API_KEY")
-        if not api_key:
-            raise EnvironmentError(
-                "RAGSystem 需要 GOOGLE_API_KEY 以构建向量索引。"
-            )
-
-        embeddings = GoogleGenerativeAIEmbeddings(model=model, google_api_key=api_key)
-
         def _build(topic: str, chunks: List[Document]) -> KnowledgeBase:
             if chunks:
                 logger.info("[RAG] 构建 %s KB (%d chunks)...", topic, len(chunks))
@@ -197,6 +180,17 @@ class RAGSystem:
             risk_kb=KnowledgeBase.build_empty("policy"),
             extraction_result=result,
         )
+
+    # ── 契约：ForumModel 只通过这几个方法访问 ──
+
+    def is_ready(self, topic: str) -> bool:
+        """该 topic 的向量索引是否可用。
+
+        原来 ForumModel 是直接读 rag_system._kbs[topic].is_ready 的，
+        跨模块摸私有属性；提升成公开方法后调用方不用知道内部结构。
+        """
+        kb = self._kbs.get(topic)
+        return kb is not None and kb.is_ready
 
     # ── 外部政策接入（Spider）──
 

@@ -36,7 +36,10 @@ from ..agents.passive_inference import infer_passive_sentiment
 from ..config import MAX_CONCURRENT_LLM_CALLS
 from ..market.exchange import Exchange
 from ..market.trading_agent import TradingSession
+from ..llm import NullLLMProvider
 from ..models import Comment, Post, Sentiment, SentimentGrid, ThreadSnapshot
+from ..ports.knowledge import KnowledgeProvider
+from ..ports.llm import LLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +66,7 @@ class ForumModel(Model):
         llm_model: str = "gemini-2.5-flash",
         use_rag: bool = True,
         max_concurrent: int = MAX_CONCURRENT_LLM_CALLS,
+        llm: Optional[LLMProvider] = None,
         use_graph: bool = False,
         use_spider: bool = False,
         seed: Optional[int] = None,
@@ -80,6 +84,8 @@ class ForumModel(Model):
             llm_model     — Extractor 使用的 LLM 模型
             use_rag       — 是否构建 FAISS RAG 知识库
             max_concurrent — 并发 LLM 调用上限（防止 rate limit）
+            llm           — 注入的 LLMProvider；None = NullLLMProvider（全程 mock）
+                            正常由 composition root 传入，不要在这里读环境变量
             use_graph     — 用 LangGraph StateGraph 编排帖子生命周期
                             False（默认）= 原有的串行调用链
                             True  = Phase 跳过逻辑交给图的条件边
@@ -92,10 +98,12 @@ class ForumModel(Model):
         self.n_inst = n_inst
         self.n_retail = n_retail
         self.max_concurrent = max_concurrent
+        # Agent 通过 self.model.llm 取用（见 BaseUserAgent.llm）
+        self.llm: LLMProvider = llm if llm is not None else NullLLMProvider()
         self.use_graph = use_graph
         self.use_spider = use_spider
         self._thread_graph = None          # 懒编译，见 thread_graph 属性
-        self.rag_system = None
+        self.rag_system: Optional[KnowledgeProvider] = None
 
         # ── 事件回调（WebSocket 实时推送用）──
         # 签名: async def on_event(event: Dict[str, Any]) -> None
@@ -169,7 +177,7 @@ class ForumModel(Model):
         """
         from ..spiders.scheduler import aensure_fresh_policies
 
-        chunks = await aensure_fresh_policies()
+        chunks = await aensure_fresh_policies(llm=self.llm)
         if not chunks or self.rag_system is None:
             logger.info("外部政策未接入（无数据或 RAG 未就绪）")
             return
@@ -204,16 +212,15 @@ class ForumModel(Model):
         from ..extractors.pipeline import extract_all_from_pdf
         from ..rag.knowledge_base import RAGSystem
 
-        result = extract_all_from_pdf(pdf_path, model=llm_model)
+        result = extract_all_from_pdf(pdf_path, self.llm)
 
-        if use_rag:
-            try:
-                self.rag_system = RAGSystem.build_from_extraction(result)
-                logger.info(self.rag_system.status())
-            except EnvironmentError as e:
-                logger.warning("RAG 构建失败（%s），降级为静态模式", e)
-                self.rag_system = RAGSystem.build_static_only(result)
+        embeddings = self.llm.embeddings() if use_rag else None
+        if embeddings is not None:
+            self.rag_system = RAGSystem.build_from_extraction(result, embeddings)
+            logger.info(self.rag_system.status())
         else:
+            if use_rag:
+                logger.warning("无可用 embedding 模型，RAG 降级为静态模式")
             self.rag_system = RAGSystem.build_static_only(result)
 
         return result.raw_sections
@@ -241,8 +248,7 @@ class ForumModel(Model):
 
         agent_type = agent.__class__.__name__
 
-        if query and self.rag_system._kbs.get(topic) and \
-                self.rag_system._kbs[topic].is_ready:
+        if query and self.rag_system.is_ready(topic):
             return self.rag_system.retrieve_for_agent(agent, topic, query)
 
         return self.rag_system.get_static_section(topic, agent_type)

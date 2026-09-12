@@ -1,8 +1,8 @@
 """
 LangGraph 帖子线程图测试
 
-全部在 Mock 模式下运行：conftest 之外再显式把 _get_structured_llm 打桩成 None，
-确保即使本机 .env 里有 GOOGLE_API_KEY 也不会真的发请求。
+全程注入 NullLLMProvider，即使本机 .env 里有 GOOGLE_API_KEY 也不会发请求。
+不需要 monkeypatch 任何模块全局变量。
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ import asyncio
 
 import pytest
 
-from src.agents import base_agent
 from src.environment.forum import ForumModel
+from src.llm import NullLLMProvider
 from src.graph import PHASE, PUBLISH, SETTLE, route_after_phase, run_thread_graph
 
 
@@ -21,15 +21,17 @@ from src.graph import PHASE, PUBLISH, SETTLE, route_after_phase, run_thread_grap
 # ═══════════════════════════════════════════════════════
 
 
-@pytest.fixture(autouse=True)
-def no_llm(monkeypatch):
-    """强制所有 Agent 走 _mock_comment，测试不触网。"""
-    monkeypatch.setattr(base_agent, "_get_structured_llm", lambda: None)
-
-
 @pytest.fixture
 def model() -> ForumModel:
-    m = ForumModel(n_normal=3, n_inst=1, n_retail=1, use_graph=True, seed=42)
+    """注入 NullLLMProvider —— Agent 全程走 _mock_comment，不触网。
+
+    注入之前这里需要 monkeypatch 模块全局 _get_structured_llm，
+    现在只是构造参数。
+    """
+    m = ForumModel(
+        n_normal=3, n_inst=1, n_retail=1,
+        llm=NullLLMProvider(), use_graph=True, seed=42,
+    )
     m.round_num = 1
     return m
 
@@ -116,12 +118,12 @@ def test_silent_thread_skips_reply_phases(model, monkeypatch):
 def test_graph_and_serial_paths_produce_same_shape():
     """图链路与原串行链路跑出来的帖子结构一致（都是 1 帖 3 Phase）。"""
     graph_model = ForumModel(n_normal=3, n_inst=1, n_retail=1,
-                             use_graph=True, seed=7)
+                             llm=NullLLMProvider(), use_graph=True, seed=7)
     graph_model.round_num = 1
     asyncio.run(graph_model.astep())
 
     serial_model = ForumModel(n_normal=3, n_inst=1, n_retail=1,
-                              use_graph=False, seed=7)
+                              llm=NullLLMProvider(), use_graph=False, seed=7)
     serial_model.round_num = 1
     asyncio.run(serial_model.astep())
 
