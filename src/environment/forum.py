@@ -64,6 +64,7 @@ class ForumModel(Model):
         use_rag: bool = True,
         max_concurrent: int = MAX_CONCURRENT_LLM_CALLS,
         use_graph: bool = False,
+        use_spider: bool = False,
         seed: Optional[int] = None,
     ):
         """
@@ -82,6 +83,7 @@ class ForumModel(Model):
             use_graph     — 用 LangGraph StateGraph 编排帖子生命周期
                             False（默认）= 原有的串行调用链
                             True  = Phase 跳过逻辑交给图的条件边
+            use_spider    — 模拟开跑前接入外部政策（1 周 TTL，命中缓存则不联网）
             seed          — 随机种子
         """
         super().__init__(seed=seed)
@@ -91,6 +93,7 @@ class ForumModel(Model):
         self.n_retail = n_retail
         self.max_concurrent = max_concurrent
         self.use_graph = use_graph
+        self.use_spider = use_spider
         self._thread_graph = None          # 懒编译，见 thread_graph 属性
         self.rag_system = None
 
@@ -158,6 +161,26 @@ class ForumModel(Model):
                 await self.on_event(event)
             except Exception as e:
                 logger.debug("事件推送失败: %s", e)
+
+    async def _ingest_external_policies(self) -> None:
+        """跑一遍政策接入图，把 chunks 并进 RAG 的 policy 知识库。
+
+        失败不抛异常：外部数据是增强项，缺了照样跑模拟。
+        """
+        from ..spiders.scheduler import aensure_fresh_policies
+
+        chunks = await aensure_fresh_policies()
+        if not chunks or self.rag_system is None:
+            logger.info("外部政策未接入（无数据或 RAG 未就绪）")
+            return
+
+        n = self.rag_system.add_policy_chunks(chunks)
+        logger.info("外部政策已并入 policy 知识库 | chunks=%d", n)
+        await self._emit({
+            "type": "system",
+            "event": "policy_ingested",
+            "chunks": n,
+        })
 
     @staticmethod
     def _sample(
@@ -308,6 +331,10 @@ class ForumModel(Model):
     async def arun(self):
         """异步主循环 —— 消除了每个 Phase 独立创建 event loop 的开销。"""
         self._started_at = datetime.now().isoformat()
+
+        # 外部政策只在开跑前接入一次，不在 12 轮中途更新
+        if self.use_spider:
+            await self._ingest_external_policies()
 
         n_active  = len(self.active_participants)
         n_passive = len(self.passive_participants)

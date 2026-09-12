@@ -73,6 +73,16 @@ class KnowledgeBase:
         """创建空 KB（无 PDF chunks 时使用，RAG 查询返回空列表）。"""
         return cls(topic=topic)
 
+    def add_documents(self, chunks: List[Document]) -> int:
+        """向已建好的索引增量追加 chunks（FAISS 原生支持）。
+
+        索引未就绪（静态模式）时返回 0，由调用方降级处理。
+        """
+        if not chunks or self._vectorstore is None:
+            return 0
+        self._vectorstore.add_documents(chunks)
+        return len(chunks)
+
     # ── 检索 ──
 
     def query(self, question: str, k: int = RAG_QUERY_K) -> List[Document]:
@@ -128,6 +138,8 @@ class RAGSystem:
             "policy":    risk_kb,
         }
         self._extraction = extraction_result
+        # Spider 抓来的外部政策 chunks，与招股书 chunks 共同构成 policy 知识库
+        self._policy_chunks: List[Document] = []
 
     # ── 构建 ──
 
@@ -186,6 +198,35 @@ class RAGSystem:
             extraction_result=result,
         )
 
+    # ── 外部政策接入（Spider）──
+
+    def add_policy_chunks(self, chunks: List[Document]) -> int:
+        """把 Spider 抓到的外部政策并入 policy 知识库。
+
+        FAISS 就绪时增量写进向量索引；静态模式下没有索引可写，
+        改由 get_static_section 把正文附在政策段落后面。
+        两条路径都会经过访问控制，不会绕过可见性矩阵。
+        """
+        if not chunks:
+            return 0
+        self._policy_chunks.extend(chunks)
+        self._kbs["policy"].add_documents(chunks)
+        return len(chunks)
+
+    def _external_policy_text(self, agent_type: str, max_chunks: int = 3) -> str:
+        """静态模式下给 policy 段落附加的外部政策摘要（已做访问控制）。"""
+        if not self._policy_chunks:
+            return ""
+
+        level = get_access_level(agent_type, "policy")
+        if level == AccessLevel.HIDDEN:
+            return ""
+
+        body = "\n\n".join(
+            d.page_content for d in self._policy_chunks[:max_chunks]
+        )
+        return "【近期外部政策动态】\n" + apply_access_control(body, level)
+
     # ── 模式 1：静态分层文本（主帖发布） ──
 
     def get_static_section(self, topic: str, agent_type: str) -> str:
@@ -194,12 +235,20 @@ class RAGSystem:
 
         用于 ForumModel 替换原来的 raw_sections 查询，
         也用于 Agent 在没有具体 query 时获取话题背景。
+        policy 话题会附上 Spider 抓到的外部政策（按可见性处理）。
         """
-        if self._extraction is not None:
-            return self._extraction.get_section_for_agent(topic, agent_type)
+        if self._extraction is None:
+            # 无 extraction_result 时降级到 HIDDEN
+            return "[此信息对你不可见]"
 
-        # 无 extraction_result 时降级到 HIDDEN
-        return "[此信息对你不可见]"
+        section = self._extraction.get_section_for_agent(topic, agent_type)
+
+        if topic == "policy":
+            extra = self._external_policy_text(agent_type)
+            if extra:
+                section = f"{section}\n\n{extra}"
+
+        return section
 
     # ── 模式 2：RAG 检索（Agent 评论时） ──
 
@@ -253,4 +302,6 @@ class RAGSystem:
         for topic, kb in self._kbs.items():
             state = "就绪 ✓" if kb.is_ready else "空索引（静态模式）"
             lines.append(f"  {topic:12s} → {state}")
+        if self._policy_chunks:
+            lines.append(f"  外部政策 chunks → {len(self._policy_chunks)} 个")
         return "\n".join(lines)
