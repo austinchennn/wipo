@@ -64,6 +64,8 @@ export function useSimulation() {
             setKlines([])
             setSentiments([])
             addLog('SYS', `模拟启动 | Agent=${data.n_total} (Active=${data.n_active})`)
+          } else if (data.event === 'policy_ingested') {
+            addLog('SYS', `外部政策已接入 | chunks=${data.chunks}`)
           } else if (data.event === 'round_start') {
             setSimState((s) => ({ ...s, round: data.round }))
             addLog('SYS', `═══ 宏观轮次 ${data.round}/${data.total_rounds} ═══`)

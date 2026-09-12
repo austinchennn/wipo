@@ -15,6 +15,7 @@ def run_simulation(
     n_inst: int = 5,
     n_retail: int = 15,
     use_graph: bool = False,
+    use_spider: bool = False,
     seed: int | None = 42,
 ) -> ForumModel:
     """创建 ForumModel 并执行 12 轮完整模拟"""
@@ -23,6 +24,7 @@ def run_simulation(
         n_inst=n_inst,
         n_retail=n_retail,
         use_graph=use_graph,
+        use_spider=use_spider,
         seed=seed,
     )
     model.run()

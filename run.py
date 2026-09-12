@@ -14,6 +14,9 @@
     # 用 LangGraph 状态图编排帖子生命周期（发帖 → 3 Phase → 撮合）
     python run.py --graph
 
+    # 接入外部政策（首次联网抓取，之后 1 周内复用缓存）
+    python run.py --graph --spider
+
     # 完整参数示例
     python run.py --pdf prospectus.pdf \\
                   --normal 700 --inst 100 --retail 200 \\
@@ -61,6 +64,8 @@ def main():
     # ── 调度引擎 ──
     parser.add_argument("--graph",      action="store_true",
                         help="用 LangGraph StateGraph 编排帖子生命周期")
+    parser.add_argument("--spider",     action="store_true",
+                        help="开跑前接入外部政策（1 周 TTL，缓存命中则不联网）")
 
     parser.add_argument("--seed",       type=int,  default=42,
                         help="随机种子（默认 42）")
@@ -89,6 +94,7 @@ def main():
         use_rag=not args.no_rag,
         max_concurrent=args.concurrent,
         use_graph=args.graph,
+        use_spider=args.spider,
         seed=args.seed,
     )
     model.run()
