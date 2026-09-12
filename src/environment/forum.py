@@ -36,7 +36,6 @@ from ..agents.passive_inference import infer_passive_sentiment
 from ..config import MAX_CONCURRENT_LLM_CALLS
 from ..market.exchange import Exchange
 from ..market.trading_agent import TradingSession
-from ..llm import NullLLMProvider
 from ..models import Comment, Post, Sentiment, SentimentGrid, ThreadSnapshot
 from ..ports.knowledge import KnowledgeProvider
 from ..ports.llm import LLMProvider
@@ -59,7 +58,7 @@ class ForumModel(Model):
     def __init__(
         self,
         knowledge: KnowledgeProvider,
-        llm: Optional[LLMProvider] = None,
+        llm: LLMProvider,
         sink: Optional[SimulationSink] = None,
         exchange: Optional[Exchange] = None,
         n_normal: int = 20,
@@ -79,7 +78,8 @@ class ForumModel(Model):
 
         参数：
             knowledge     — 分层知识库（KnowledgeProvider）
-            llm           — LLMProvider；None = NullLLMProvider（全程 mock）
+            llm           — LLMProvider（必填）。没有 LLM 要显式传
+                            NullLLMProvider()，而不是省略参数默认降级
             sink          — 落库目标；None = 不持久化
             exchange      — 交易所；None = 新建一个。纯内存领域对象，
                             没有 I/O，所以默认自建而不是强制注入
@@ -105,7 +105,7 @@ class ForumModel(Model):
         self.n_retail = n_retail
         self.max_concurrent = max_concurrent
         # Agent 通过 self.model.llm 取用（见 BaseUserAgent.llm）
-        self.llm: LLMProvider = llm if llm is not None else NullLLMProvider()
+        self.llm: LLMProvider = llm
         self.use_graph = use_graph
         self.use_spider = use_spider
         self._thread_graph = None          # 懒编译，见 thread_graph 属性
