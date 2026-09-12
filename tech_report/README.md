@@ -9,6 +9,7 @@
 | [03_market_exchange.md](03_market_exchange.md) | 交易系统：限价订单簿连续竞价撮合引擎、Agent 分层交易决策、量价逻辑、持仓管理 |
 | [04_data_persistence.md](04_data_persistence.md) | 数据持久化：SQLite 存储、时间戳评论回放、全量数据保存与查询接口 |
 | [05_frontend_backend.md](05_frontend_backend.md) | 前端↔后端连接：WebSocket 实时推送、REST API、Broadcaster、React Hook |
+| [06_dependency_inversion.md](06_dependency_inversion.md) | 依赖反转：ports 抽象层、Settings 配置收敛、composition root、架构约束测试 |
 
 ---
 

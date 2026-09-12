@@ -1,8 +1,8 @@
 """
 外部政策接入链路测试
 
-全程离线：爬虫用假 spider 注入，分类器强制走规则兜底，
-不发任何 HTTP 请求、不调用任何 LLM。
+全程离线：爬虫和 LLM 都按 Protocol 注入替身，
+不发任何 HTTP 请求、不调用任何真实 LLM，也不 monkeypatch 任何模块全局。
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from src.graph.ingest_graph import (
 )
 from src.persistence import PolicyStore
 from src.policy_engine import classifier
+from src.ports import LLMProvider, PolicyFeed
 from src.spiders.models import CleanedPolicy, RawPolicy
 from src.spiders.news_cleaner import (
     clean,
@@ -65,7 +66,7 @@ ATOM_XML = """<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
 
 
 class FakeSpider:
-    """替身爬虫：返回固定条目，记录被调用次数。"""
+    """替身爬虫：返回固定条目，记录被调用次数。满足 ports.PolicyFeed。"""
 
     def __init__(self):
         self.calls = 0
@@ -75,10 +76,9 @@ class FakeSpider:
         return parse_feed(RSS_XML, "sec") + parse_feed(ATOM_XML, "csrc")
 
 
-@pytest.fixture(autouse=True)
-def no_llm(monkeypatch):
-    """分类器强制走关键词规则，测试不触网。"""
-    monkeypatch.setattr(classifier, "_get_classifier_llm", lambda: None)
+def test_fake_spider_satisfies_port():
+    """替身必须满足 Protocol —— 改了 PolicyFeed 签名这里会先报错。"""
+    assert isinstance(FakeSpider(), PolicyFeed)
 
 
 @pytest.fixture
@@ -168,16 +168,50 @@ def test_classify_by_rules(text, expected):
     assert set(classifier.classify_by_rules(text)) == expected
 
 
-def test_classify_filters_unknown_labels(monkeypatch):
+class FakeProvider:
+    """满足 LLMProvider 契约的替身：直接注入，不用 monkeypatch。"""
+
+    def __init__(self, labels):
+        self._labels = labels
+
+    @property
+    def is_available(self):
+        return True
+
+    def structured(self, schema, *, temperature=None):
+        labels = self._labels
+
+        class _Model:
+            def invoke(self, messages):
+                return classifier.PolicyLabels(labels=labels)
+
+            async def ainvoke(self, messages):
+                return classifier.PolicyLabels(labels=labels)
+
+        return _Model()
+
+    def embeddings(self):
+        return None
+
+
+def test_fake_provider_satisfies_port():
+    """替身必须满足 Protocol，否则改了契约测试不会报错。"""
+    assert isinstance(FakeProvider([]), LLMProvider)
+
+
+def test_classify_filters_unknown_labels():
     """LLM 返回集合外的标签要被过滤掉，不能污染标签体系。"""
-
-    class FakeLLM:
-        async def ainvoke(self, _prompt):
-            return classifier.PolicyLabels(labels=["ipo", "made-up-label"])
-
-    monkeypatch.setattr(classifier, "_get_classifier_llm", lambda: FakeLLM())
     p = CleanedPolicy(hash="h", source="s", url="u", title="t", text="body")
-    assert asyncio.run(classifier.aclassify(p)) == ["ipo"]
+    llm = FakeProvider(["ipo", "made-up-label"])
+    assert asyncio.run(classifier.aclassify(p, llm)) == ["ipo"]
+
+
+def test_classify_falls_back_when_llm_returns_nothing_valid():
+    """LLM 全是无效标签时退回规则，而不是返回空。"""
+    p = CleanedPolicy(hash="h", source="s", url="u", title="t",
+                      text="The SEC charged the founder with fraud")
+    llm = FakeProvider(["nonsense"])
+    assert asyncio.run(classifier.aclassify(p, llm)) == ["enforcement"]
 
 
 # ═══════════════════════════════════════════════════════

@@ -7,7 +7,7 @@ pipeline — 三个 Extractor 的编排器。
 用法：
     from src.extractors import extract_all_from_pdf
 
-    result = extract_all_from_pdf("prospectus.pdf")
+    result = extract_all_from_pdf("prospectus.pdf", llm)
 
     # 主持人发帖用的三段原始文本（Level A / 机构版 / 高敏感版）
     raw_sections = result.raw_sections
@@ -30,6 +30,7 @@ from typing import Dict, List, Optional
 from langchain_core.documents import Document
 
 from ..config import CHUNK_OVERLAP, CHUNK_SIZE
+from ..ports.llm import LLMProvider
 from .base_extractor import load_pdf_chunks
 from .financial_extractor import FinancialExtractor, FinancialSummary
 from .product_extractor import ProductExtractor, ProductSummary
@@ -108,7 +109,7 @@ class ExtractionResult:
 
 def extract_all_from_pdf(
     pdf_path: str | Path,
-    model: str = "gemini-2.5-flash",
+    llm: LLMProvider,
     chunk_size: int = CHUNK_SIZE,
     chunk_overlap: int = CHUNK_OVERLAP,
     verbose: bool = True,
@@ -117,7 +118,7 @@ def extract_all_from_pdf(
 
     参数：
         pdf_path     — 用户上传的 PDF 路径
-        model        — Gemini 模型名（gemini-2.5-flash）
+        llm          — 注入的 LLMProvider（模型名和 Key 都由它持有）
         chunk_size   — 分块大小（字符数）
         chunk_overlap — 分块重叠（字符数）
         verbose      — 是否打印进度
@@ -126,13 +127,6 @@ def extract_all_from_pdf(
         ExtractionResult（含三份摘要 + 三份 RAG chunks）
     """
     pdf_path = Path(pdf_path)
-
-    # ── 加载环境变量（如果有 .env 文件）──
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        pass
 
     _level = logging.INFO if verbose else logging.DEBUG
     _log = lambda msg: logger.log(_level, msg)
@@ -150,9 +144,9 @@ def extract_all_from_pdf(
 
     # Step 2: 并行提取三类信息（节省约 2/3 时间）
     _log("[2/2] 并行提取产品 / 财务 / 风险信息...")
-    product_extractor   = ProductExtractor(model=model)
-    financial_extractor = FinancialExtractor(model=model)
-    risk_extractor      = RiskExtractor(model=model)
+    product_extractor   = ProductExtractor(llm)
+    financial_extractor = FinancialExtractor(llm)
+    risk_extractor      = RiskExtractor(llm)
 
     with ThreadPoolExecutor(max_workers=3) as pool:
         f_product   = pool.submit(product_extractor.extract,   all_chunks)

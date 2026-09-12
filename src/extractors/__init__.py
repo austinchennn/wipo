@@ -21,7 +21,7 @@
     # result.get_section_for_agent(topic, agent_type) → 按 Agent 类型返回对应层级
 """
 
-from .base_extractor import load_pdf_chunks, get_llm
+from .base_extractor import load_pdf_chunks, require_structured
 from .product_extractor import ProductExtractor, ProductSummary
 from .financial_extractor import FinancialExtractor, FinancialSummary
 from .risk_extractor import RiskExtractor, RiskSummary
@@ -29,7 +29,7 @@ from .pipeline import extract_all_from_pdf, make_mock_extraction, ExtractionResu
 
 __all__ = [
     "load_pdf_chunks",
-    "get_llm",
+    "require_structured",
     "ProductExtractor",
     "ProductSummary",
     "FinancialExtractor",

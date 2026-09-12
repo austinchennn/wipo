@@ -163,19 +163,15 @@ class SimulationDB:
     #  一次性保存完整模拟
     # ═══════════════════════════════════════════════════
 
-    def save(self, model) -> int:
-        """保存 ForumModel 的全量数据到 SQLite。
+    def save(self, model: Any) -> int:
+        """保存一场模拟的全量数据到 SQLite。
+
+        只按 ports.SimulationSink 契约工作，不 import 也不 isinstance
+        检查 ForumModel —— 底层持久化不该依赖上层领域模型。
 
         在一个事务中批量写入，保证原子性。
         返回 simulation_id。
         """
-        # 延迟导入避免循环引用；测试时允许 duck-typing
-        try:
-            from ..environment.forum import ForumModel
-            if not isinstance(model, ForumModel):
-                logger.debug("save() 接收到非 ForumModel 实例，以 duck-typing 模式运行")
-        except ImportError:
-            pass
 
         now = datetime.now().isoformat()
 

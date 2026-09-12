@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from ..composition import RunOptions, build_simulation
+from ..settings import Settings
 from .broadcaster import broadcaster
 
 logger = logging.getLogger(__name__)
@@ -110,28 +111,28 @@ async def start_simulation(req: SimulateRequest):
     if sim_state.running:
         return {"ok": False, "error": "模拟正在运行中，请等待结束"}
 
-    # 前端传入的 API Key → 写入环境变量（不持久化）
-    if req.api_key:
-        os.environ["GOOGLE_API_KEY"] = req.api_key
+    # 前端传入的 Key 只作用于这一次模拟，不再污染进程级 os.environ
+    settings = (
+        Settings.from_env()
+        .with_api_key(req.api_key)
+        .with_model(req.llm_model)
+    )
 
     sim_state.running = True
     sim_state.error = None
 
     async def run_sim():
         try:
-            from ..environment.forum import ForumModel
-
-            model = ForumModel(
+            model = build_simulation(settings, RunOptions(
                 n_normal=req.n_normal,
                 n_inst=req.n_inst,
                 n_retail=req.n_retail,
                 n_active=req.n_active,
                 pdf_path=req.pdf_path,
                 use_rag=req.use_rag,
-                llm_model=req.llm_model,
                 max_concurrent=req.max_concurrent,
                 seed=req.seed,
-            )
+            ))
             model.on_event = broadcaster.broadcast
             sim_state.model = model
 

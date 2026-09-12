@@ -33,7 +33,8 @@ from __future__ import annotations
 import argparse
 import logging
 
-from src.environment.forum import ForumModel
+from src.composition import RunOptions, build_simulation
+from src.settings import Settings
 
 
 def main():
@@ -78,26 +79,21 @@ def main():
         datefmt="%H:%M:%S",
     )
 
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        pass
-
-    model = ForumModel(
+    settings = Settings.from_env().with_model(args.model)
+    opts = RunOptions(
         n_normal=args.normal,
         n_inst=args.inst,
         n_retail=args.retail,
         n_active=args.active,
         pdf_path=args.pdf,
-        llm_model=args.model,
         use_rag=not args.no_rag,
-        max_concurrent=args.concurrent,
         use_graph=args.graph,
         use_spider=args.spider,
+        max_concurrent=args.concurrent,
         seed=args.seed,
     )
-    model.run()
+
+    build_simulation(settings, opts).run()
 
 
 if __name__ == "__main__":

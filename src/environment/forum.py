@@ -37,6 +37,9 @@ from ..config import MAX_CONCURRENT_LLM_CALLS
 from ..market.exchange import Exchange
 from ..market.trading_agent import TradingSession
 from ..models import Comment, Post, Sentiment, SentimentGrid, ThreadSnapshot
+from ..ports.knowledge import KnowledgeProvider
+from ..ports.llm import LLMProvider
+from ..ports.persistence import SimulationSink
 
 logger = logging.getLogger(__name__)
 
@@ -54,32 +57,41 @@ class ForumModel(Model):
 
     def __init__(
         self,
+        knowledge: KnowledgeProvider,
+        llm: LLMProvider,
+        sink: Optional[SimulationSink] = None,
+        exchange: Optional[Exchange] = None,
         n_normal: int = 20,
         n_inst: int = 5,
         n_retail: int = 15,
         n_active: Optional[int] = None,
         raw_sections: Optional[Dict[str, str]] = None,
-        pdf_path: Optional[str] = None,
-        llm_model: str = "gemini-2.5-flash",
-        use_rag: bool = True,
         max_concurrent: int = MAX_CONCURRENT_LLM_CALLS,
         use_graph: bool = False,
         use_spider: bool = False,
+        policy_db_path: str = "output/policies.db",
         seed: Optional[int] = None,
     ):
         """
+        依赖由 composition root 注入，本类不再自己装配任何带 I/O 的东西
+        （不跑 Extractor、不建 FAISS、不开 SQLite）。
+
         参数：
+            knowledge     — 分层知识库（KnowledgeProvider）
+            llm           — LLMProvider（必填）。没有 LLM 要显式传
+                            NullLLMProvider()，而不是省略参数默认降级
+            sink          — 落库目标；None = 不持久化
+            exchange      — 交易所；None = 新建一个。纯内存领域对象，
+                            没有 I/O，所以默认自建而不是强制注入
             n_normal      — 普通 Agent 总数
             n_inst        — 机构 Agent 总数
             n_retail      — 散户 Agent 总数
             n_active      — 实际调 LLM 的 Agent 数量上限
                             None = 全部 Active（适合小规模测试）
                             整数 = 按比例从各类型中抽取 Active，其余为 Passive
-            raw_sections  — 手动传入三段文本（向后兼容旧接口）
-            pdf_path      — 用户上传的招股书 PDF 路径
-            llm_model     — Extractor 使用的 LLM 模型
-            use_rag       — 是否构建 FAISS RAG 知识库
+            raw_sections  — 手动覆盖三段主贴文本（默认取 knowledge 的 Host 视角）
             max_concurrent — 并发 LLM 调用上限（防止 rate limit）
+            policy_db_path — 外部政策缓存路径（use_spider=True 时用）
             use_graph     — 用 LangGraph StateGraph 编排帖子生命周期
                             False（默认）= 原有的串行调用链
                             True  = Phase 跳过逻辑交给图的条件边
@@ -92,24 +104,24 @@ class ForumModel(Model):
         self.n_inst = n_inst
         self.n_retail = n_retail
         self.max_concurrent = max_concurrent
+        # Agent 通过 self.model.llm 取用（见 BaseUserAgent.llm）
+        self.llm: LLMProvider = llm
         self.use_graph = use_graph
         self.use_spider = use_spider
         self._thread_graph = None          # 懒编译，见 thread_graph 属性
-        self.rag_system = None
+        self.rag_system: KnowledgeProvider = knowledge
+        self.sink = sink
+        self.policy_db_path = policy_db_path
 
         # ── 事件回调（WebSocket 实时推送用）──
         # 签名: async def on_event(event: Dict[str, Any]) -> None
         self.on_event: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
 
-        # ── 信息来源 ──
-        if pdf_path is not None:
-            self.raw_sections = self._load_from_pdf(
-                pdf_path, llm_model=llm_model, use_rag=use_rag
-            )
-        elif raw_sections is not None:
-            self.raw_sections = raw_sections
-        else:
-            self.raw_sections = self._load_mock()
+        # ── 主贴文本（Host 视角的完整三段）──
+        self.raw_sections: Dict[str, str] = (
+            raw_sections if raw_sections is not None
+            else knowledge.get_raw_sections_for_host()
+        )
 
         # ── 创建全量 Agents（先全部 is_active=True）──
         self.host = HostAgent(self)
@@ -143,7 +155,7 @@ class ForumModel(Model):
         self.all_agent_ids: List[int] = [a.unique_id for a in all_agents]
 
         # ── 交易所 ──
-        self.exchange = Exchange()
+        self.exchange = exchange if exchange is not None else Exchange()
         for a in all_agents:
             self.exchange.init_portfolio(a.unique_id, a.__class__.__name__)
 
@@ -169,9 +181,11 @@ class ForumModel(Model):
         """
         from ..spiders.scheduler import aensure_fresh_policies
 
-        chunks = await aensure_fresh_policies()
-        if not chunks or self.rag_system is None:
-            logger.info("外部政策未接入（无数据或 RAG 未就绪）")
+        chunks = await aensure_fresh_policies(
+            db_path=self.policy_db_path, llm=self.llm
+        )
+        if not chunks:
+            logger.info("外部政策未接入（本次没拿到数据）")
             return
 
         n = self.rag_system.add_policy_chunks(chunks)
@@ -195,38 +209,6 @@ class ForumModel(Model):
         return random.sample(pool, k)
 
     # ═══════════════════════════════════════════════════
-    #  信息来源初始化
-    # ═══════════════════════════════════════════════════
-
-    def _load_from_pdf(
-        self, pdf_path: str, llm_model: str, use_rag: bool
-    ) -> Dict[str, str]:
-        from ..extractors.pipeline import extract_all_from_pdf
-        from ..rag.knowledge_base import RAGSystem
-
-        result = extract_all_from_pdf(pdf_path, model=llm_model)
-
-        if use_rag:
-            try:
-                self.rag_system = RAGSystem.build_from_extraction(result)
-                logger.info(self.rag_system.status())
-            except EnvironmentError as e:
-                logger.warning("RAG 构建失败（%s），降级为静态模式", e)
-                self.rag_system = RAGSystem.build_static_only(result)
-        else:
-            self.rag_system = RAGSystem.build_static_only(result)
-
-        return result.raw_sections
-
-    def _load_mock(self) -> Dict[str, str]:
-        from ..extractors.pipeline import make_mock_extraction
-        from ..rag.knowledge_base import RAGSystem
-
-        result = make_mock_extraction()
-        self.rag_system = RAGSystem.build_static_only(result)
-        return result.raw_sections
-
-    # ═══════════════════════════════════════════════════
     #  Agent 可见上下文
     # ═══════════════════════════════════════════════════
 
@@ -236,13 +218,9 @@ class ForumModel(Model):
         topic: str,
         query: str = "",
     ) -> str:
-        if self.rag_system is None:
-            return agent.get_visible_content(self.raw_sections, topic)
-
         agent_type = agent.__class__.__name__
 
-        if query and self.rag_system._kbs.get(topic) and \
-                self.rag_system._kbs[topic].is_ready:
+        if query and self.rag_system.is_ready(topic):
             return self.rag_system.retrieve_for_agent(agent, topic, query)
 
         return self.rag_system.get_static_section(topic, agent_type)
@@ -386,15 +364,16 @@ class ForumModel(Model):
             ms["total_volume"], ms["total_trades"], ms["ticks"],
         )
 
-        # ── 持久化：模拟结束后一次性写入 SQLite ──
-        try:
-            from ..persistence.database import SimulationDB
-            db = SimulationDB()
-            sim_id = db.save(self)
-            db.close()
-            logger.info("模拟数据已持久化 | simulation_id=%d", sim_id)
-        except Exception as e:
-            logger.warning("持久化失败（不影响模拟结果）: %s", e)
+        # ── 持久化：模拟结束后一次性写入注入的 sink ──
+        if self.sink is None:
+            logger.debug("未配置 sink，跳过持久化")
+        else:
+            try:
+                sim_id = self.sink.save(self)
+                self.sink.close()
+                logger.info("模拟数据已持久化 | simulation_id=%d", sim_id)
+            except Exception as e:
+                logger.warning("持久化失败（不影响模拟结果）: %s", e)
 
         await self._emit({
             "type": "system",

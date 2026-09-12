@@ -26,6 +26,7 @@ from langchain_core.documents import Document
 
 from ..config import POLICY_CACHE_TTL_DAYS
 from ..persistence.policy_store import PolicyStore
+from ..ports.llm import LLMProvider
 from .policy_spider import PolicySource, PolicySpider
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ async def aensure_fresh_policies(
     ttl_days: int = POLICY_CACHE_TTL_DAYS,
     sources: Optional[Iterable[PolicySource]] = None,
     db_path: str | Path = "output/policies.db",
+    llm: Optional[LLMProvider] = None,
 ) -> List[Document]:
     """跑一遍政策接入图，返回可并入 RAG 的 Document chunks。
 
@@ -45,7 +47,7 @@ async def aensure_fresh_policies(
 
     store = PolicyStore(db_path)
     try:
-        graph = build_ingest_graph(store, PolicySpider(sources=sources))
+        graph = build_ingest_graph(store, PolicySpider(sources=sources), llm)
         state = await graph.ainvoke(make_initial_state(ttl_days))
         logger.debug("[政策接入] 图执行路径: %s", " → ".join(state.get("trace", [])))
         return state.get("chunks", [])
@@ -60,8 +62,9 @@ def ensure_fresh_policies(
     ttl_days: int = POLICY_CACHE_TTL_DAYS,
     sources: Optional[Iterable[PolicySource]] = None,
     db_path: str | Path = "output/policies.db",
+    llm: Optional[LLMProvider] = None,
 ) -> List[Document]:
     """同步入口（脚本 / REPL 用）。"""
-    return asyncio.run(
-        aensure_fresh_policies(ttl_days=ttl_days, sources=sources, db_path=db_path)
-    )
+    return asyncio.run(aensure_fresh_policies(
+        ttl_days=ttl_days, sources=sources, db_path=db_path, llm=llm
+    ))
