@@ -6,6 +6,7 @@ composition —— 唯一的装配点（composition root）
     LLMProvider       → GeminiProvider / NullLLMProvider
     KnowledgeProvider → RAGSystem（FAISS 或静态模式）
     SimulationSink    → SimulationDB / None
+    DecisionModel     → TypeSafeDecisionModel（Jev） / NullDecisionModel
 
 其余模块只依赖 src/ports 里的 Protocol。调用这里的只有两个入口：
 run.py（CLI）和 api/main.py（HTTP）。
@@ -22,7 +23,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .config import MAX_CONCURRENT_LLM_CALLS
+from .decision import NullDecisionModel, TypeSafeDecisionModel
 from .llm import GeminiProvider, NullLLMProvider
+from .ports.decision import DecisionModel
 from .ports.knowledge import KnowledgeProvider
 from .ports.llm import LLMProvider
 from .ports.persistence import SimulationSink
@@ -48,6 +51,7 @@ class RunOptions:
     use_graph: bool = False
     use_spider: bool = False
     persist: bool = True
+    use_decision_model: bool = True   # 配了 TYPESAFE_API_KEY 时交易走 Jev
     max_concurrent: int = MAX_CONCURRENT_LLM_CALLS
     seed: Optional[int] = 42
 
@@ -69,6 +73,19 @@ def build_llm_provider(settings: Settings) -> LLMProvider:
 
     logger.warning("未检测到 GOOGLE_API_KEY：Agent 走 mock 评论，政策分类走关键词规则")
     return NullLLMProvider()
+
+
+def build_decision_model(settings: Settings) -> DecisionModel:
+    """配了 TYPESAFE_API_KEY 且 SDK 可用就用 Jev，否则明确返回 Null。
+
+    Null 时交易决策整体退回规则，行为与接入 Jev 之前完全一致。
+    """
+    if settings.has_decision_model:
+        model = TypeSafeDecisionModel()
+        if model.is_available:
+            return model
+    logger.info("未启用 Jev（无 TYPESAFE_API_KEY 或未安装 langchain-typesafe）：交易走规则")
+    return NullDecisionModel()
 
 
 def build_knowledge(
@@ -127,6 +144,8 @@ def build_simulation(settings: Settings, opts: RunOptions):
         knowledge=build_knowledge(llm, opts.pdf_path, opts.use_rag),
         llm=llm,
         sink=build_sink(settings, opts.persist),
+        decider=(build_decision_model(settings)
+                 if opts.use_decision_model else None),
         policy_db_path=settings.policy_db_path,
         n_normal=opts.n_normal,
         n_inst=opts.n_inst,
