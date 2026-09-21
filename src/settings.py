@@ -31,6 +31,9 @@ class Settings:
     """一次运行的全部环境相关配置。不可变——要改用 with_api_key()。"""
 
     google_api_key: Optional[str] = None
+    # Jev（langchain-typesafe）的 Key。SDK 自己从 TYPESAFE_API_KEY 读，
+    # 这里只用来判断"配没配"，决定 composition 要不要装配 Jev
+    typesafe_api_key: Optional[str] = None
     chat_model: str = DEFAULT_LLM_MODEL
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
     agent_temperature: float = AGENT_LLM_TEMPERATURE
@@ -49,6 +52,7 @@ class Settings:
 
         return cls(
             google_api_key=os.environ.get("GOOGLE_API_KEY") or None,
+            typesafe_api_key=os.environ.get("TYPESAFE_API_KEY") or None,
             chat_model=os.environ.get("AGENT_LLM_MODEL", DEFAULT_LLM_MODEL),
             embedding_model=os.environ.get(
                 "EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL
@@ -74,3 +78,7 @@ class Settings:
     @property
     def has_llm(self) -> bool:
         return bool(self.google_api_key)
+
+    @property
+    def has_decision_model(self) -> bool:
+        return bool(self.typesafe_api_key)
