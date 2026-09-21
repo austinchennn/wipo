@@ -90,6 +90,7 @@ def rel(path: Path) -> str:
 THIRD_PARTY = (
     "langchain", "langchain_core", "langchain_google_genai",
     "langchain_community", "langchain_text_splitters", "langgraph",
+    "langchain_typesafe",
     "httpx", "mesa", "faiss", "sqlite3", "pdfplumber", "fastapi", "numpy",
 )
 
@@ -107,7 +108,7 @@ def test_ports_import_no_third_party(path: Path):
 @pytest.mark.parametrize("path", list(python_files(SRC / "ports")), ids=rel)
 def test_ports_import_no_implementation(path: Path):
     """ports 不能在运行时依赖任何具体实现模块。"""
-    banned = ("src.llm", "src.rag", "src.persistence", "src.environment",
+    banned = ("src.llm", "src.decision", "src.rag", "src.persistence", "src.environment",
               "src.agents", "src.graph", "src.extractors")
     offenders = {
         m for m in imported_modules(path)
@@ -178,6 +179,30 @@ def test_only_adapter_imports_gemini():
     assert not offenders, f"这些文件绕过 LLMProvider 直接用 Gemini: {offenders}"
 
 
+ALLOWED_TYPESAFE_IMPORTERS = {"src/decision/typesafe.py"}
+
+
+def test_only_adapter_imports_typesafe():
+    """领域层不许直接 import langchain_typesafe，Jev 只能经 DecisionModel 进来。"""
+    offenders = [
+        rel(p) for p in python_files(SRC)
+        if rel(p) not in ALLOWED_TYPESAFE_IMPORTERS
+        and any(m.startswith("langchain_typesafe") for m in imported_modules(p, runtime_only=False))
+    ]
+    assert not offenders, f"这些文件绕过 DecisionModel 直接用 Jev: {offenders}"
+
+
+def test_only_composition_root_builds_decision_model():
+    """具体决策模型的装配只发生在 composition root。"""
+    allowed = {"src/composition.py", "src/decision/__init__.py"}
+    offenders = [
+        rel(p) for p in python_files(SRC)
+        if rel(p) not in allowed and not rel(p).startswith("src/decision/")
+        and any(m.startswith("src.decision") for m in imported_modules(p))
+    ]
+    assert not offenders, f"这些文件自己装配了具体决策模型: {offenders}"
+
+
 def test_persistence_does_not_depend_on_environment():
     """底层持久化不许反向依赖上层领域模型。"""
     offenders = [
@@ -218,6 +243,11 @@ def test_concrete_classes_satisfy_their_ports():
     from src.settings import Settings
     from src.spiders.policy_spider import PolicySpider
 
+    from src.decision import NullDecisionModel, TypeSafeDecisionModel
+    from src.ports import DecisionModel
+
+    assert isinstance(NullDecisionModel(), DecisionModel)
+    assert isinstance(TypeSafeDecisionModel(), DecisionModel)
     assert isinstance(NullLLMProvider(), LLMProvider)
     assert isinstance(GeminiProvider(Settings()), LLMProvider)
     assert isinstance(PolicySpider(), PolicyFeed)

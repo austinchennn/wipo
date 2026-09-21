@@ -37,6 +37,7 @@ from ..config import MAX_CONCURRENT_LLM_CALLS
 from ..market.exchange import Exchange
 from ..market.trading_agent import TradingSession
 from ..models import Comment, Post, Sentiment, SentimentGrid, ThreadSnapshot
+from ..ports.decision import DecisionModel
 from ..ports.knowledge import KnowledgeProvider
 from ..ports.llm import LLMProvider
 from ..ports.persistence import SimulationSink
@@ -60,6 +61,7 @@ class ForumModel(Model):
         knowledge: KnowledgeProvider,
         llm: LLMProvider,
         sink: Optional[SimulationSink] = None,
+        decider: Optional[DecisionModel] = None,
         exchange: Optional[Exchange] = None,
         n_normal: int = 20,
         n_inst: int = 5,
@@ -81,6 +83,7 @@ class ForumModel(Model):
             llm           — LLMProvider（必填）。没有 LLM 要显式传
                             NullLLMProvider()，而不是省略参数默认降级
             sink          — 落库目标；None = 不持久化
+            decider       — 交易决策模型（Jev）；None / 不可用 = 交易走纯规则
             exchange      — 交易所；None = 新建一个。纯内存领域对象，
                             没有 I/O，所以默认自建而不是强制注入
             n_normal      — 普通 Agent 总数
@@ -111,6 +114,7 @@ class ForumModel(Model):
         self._thread_graph = None          # 懒编译，见 thread_graph 属性
         self.rag_system: KnowledgeProvider = knowledge
         self.sink = sink
+        self.decider: Optional[DecisionModel] = decider
         self.policy_db_path = policy_db_path
 
         # ── 事件回调（WebSocket 实时推送用）──
@@ -461,8 +465,9 @@ class ForumModel(Model):
         if latest_sg is not None:
             all_agents = self.active_participants + self.passive_participants
             event = f"{self.TOPIC_CN[post.topic]}讨论结束"
-            session = TradingSession(self.exchange, latest_sg.grid)
-            bar = session.run(all_agents, event=event)
+            session = TradingSession(self.exchange, latest_sg.grid, self.decider)
+            # 决策模型是网络调用，放线程里跑，别卡住事件循环（WebSocket 推送）
+            bar = await asyncio.to_thread(session.run, all_agents, event=event)
             await self._emit({
                 "type": "trade",
                 "post_id": post.id,

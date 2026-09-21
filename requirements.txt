@@ -16,6 +16,9 @@ langchain-community>=0.3
 langchain-text-splitters>=0.3
 faiss-cpu>=1.7.4
 
+# 交易决策模型 Jev（可选；不装则交易走规则。需要环境变量 TYPESAFE_API_KEY）
+# langchain-typesafe
+
 # 爬虫（外部政策接入）
 httpx>=0.27
 

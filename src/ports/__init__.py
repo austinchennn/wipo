@@ -7,6 +7,7 @@ ports —— 抽象层（依赖反转的边界）
     上层                     ports                 具体实现
     ─────────────────────────────────────────────────────────
     BaseUserAgent      →  LLMProvider        ←  GeminiProvider / NullLLMProvider
+    TradingSession     →  DecisionModel      ←  TypeSafeDecisionModel / NullDecisionModel
     classifier         →  LLMProvider        ←      同上
     ForumModel         →  SimulationSink     ←  SimulationDB
     ForumModel         →  KnowledgeProvider  ←  RAGSystem
@@ -17,6 +18,7 @@ ports —— 抽象层（依赖反转的边界）
 只有 run.py 和 api/main.py 会调它。
 """
 
+from .decision import Assessment, DecisionModel
 from .knowledge import KnowledgeProvider
 from .llm import EmbeddingModel, LLMProvider, StructuredModel
 from .persistence import PolicyCache, SimulationSink
@@ -26,6 +28,8 @@ __all__ = [
     "LLMProvider",
     "StructuredModel",
     "EmbeddingModel",
+    "DecisionModel",
+    "Assessment",
     "SimulationSink",
     "PolicyCache",
     "PolicyFeed",
